@@ -99,8 +99,6 @@ export function POSCounterClient({
       if (matched) {
         addItem(matched, 1);
         toast.success(`Added "${matched.name}" to cart!`);
-      } else {
-        toast.error(`No product matches barcode: ${barcode}`);
       }
     }
   };

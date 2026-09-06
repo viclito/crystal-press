@@ -6,11 +6,13 @@ import {
   Camera,
   Scan,
   CheckCircle2,
+  AlertCircle,
   Flashlight,
   FlashlightOff,
   Sparkles,
   Zap,
   ZoomIn,
+  RefreshCw,
 } from "lucide-react";
 import {
   BarcodeFormat,
@@ -42,6 +44,7 @@ export function BarcodeCameraModal({
   const [manualCode, setManualCode] = useState("");
   const [isSearching, setIsSearching] = useState(false);
   const [detectedProduct, setDetectedProduct] = useState<any | null>(null);
+  const [unrecognizedCode, setUnrecognizedCode] = useState<string | null>(null);
   const [hasTorch, setHasTorch] = useState(false);
   const [isTorchOn, setIsTorchOn] = useState(false);
   const [zoomLevel, setZoomLevel] = useState<1 | 2>(1);
@@ -56,7 +59,8 @@ export function BarcodeCameraModal({
   const tickCountRef = useRef(0);
   const isHandlingRef = useRef(false);
 
-  // Configure Hints for ZXing
+  // Strict formats: Code 128 (Crystal Press), EAN/UPC (Retail standard)
+  // Exclude Code 39 & ITF to completely eliminate false-positive ghost reads from screen text / moiré
   const getHints = useCallback(() => {
     const hints = new Map();
     const formats = [
@@ -65,11 +69,7 @@ export function BarcodeCameraModal({
       BarcodeFormat.EAN_8,
       BarcodeFormat.UPC_A,
       BarcodeFormat.UPC_E,
-      BarcodeFormat.CODE_39,
-      BarcodeFormat.CODE_93,
-      BarcodeFormat.ITF,
       BarcodeFormat.QR_CODE,
-      BarcodeFormat.DATA_MATRIX,
     ];
     hints.set(DecodeHintType.POSSIBLE_FORMATS, formats);
     hints.set(DecodeHintType.TRY_HARDER, true);
@@ -82,41 +82,48 @@ export function BarcodeCameraModal({
       if (!code || isHandlingRef.current) return;
       isHandlingRef.current = true;
       setIsSearching(true);
-      setScanStatusText(`Detected: ${code}`);
-
-      // Play scanner audio & haptic feedback on phones
-      playScannerBeep();
-      if (typeof navigator !== "undefined" && navigator.vibrate) {
-        navigator.vibrate([70, 40, 70]);
-      }
-
-      toast.info(`Scanned: ${code}`, "Barcode Detected");
+      setUnrecognizedCode(null);
+      setScanStatusText(`Checking: ${code}...`);
 
       try {
         const res = await searchProductByBarcode(code);
         if (res.success && res.product) {
+          // Success: Matched item in database
+          playScannerBeep();
+          if (typeof navigator !== "undefined" && navigator.vibrate) {
+            navigator.vibrate([70, 40, 70]);
+          }
           setDetectedProduct(res.product);
+          setScanStatusText(`Matched: ${res.product.name}`);
           onDetected(code, res.product);
           setTimeout(() => {
             onClose();
-          }, 800);
+          }, 750);
         } else {
-          onDetected(code);
+          // Unrecognized: Valid barcode format, but not found in catalog
           playErrorBeep();
+          setUnrecognizedCode(code);
+          setScanStatusText(`Not Found: ${code}`);
           toast.warning(`Scanned: ${code} (Not found in catalog)`);
+
+          // 3.5s cooldown so it does not loop spam toasts
           setTimeout(() => {
             isHandlingRef.current = false;
             setIsSearching(false);
+            setUnrecognizedCode(null);
             setScanStatusText("Align barcode in box");
-          }, 1500);
+          }, 3500);
         }
       } catch (err) {
-        onDetected(code);
+        playErrorBeep();
+        setUnrecognizedCode(code);
+        toast.error(`Scan lookup failed: ${code}`);
         setTimeout(() => {
           isHandlingRef.current = false;
           setIsSearching(false);
+          setUnrecognizedCode(null);
           setScanStatusText("Align barcode in box");
-        }, 1500);
+        }, 3500);
       }
     },
     [onDetected, onClose]
@@ -158,10 +165,9 @@ export function BarcodeCameraModal({
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
 
-    // Crop to the central reticle target
-    // In 2x zoom mode: focus tighter; In 1x mode: capture ~82% width, 38% height
-    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.55 : 0.82));
-    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.28 : 0.38));
+    // Crop to the central reticle target with generous height to cover full sticker
+    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.65 : 0.85));
+    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.42 : 0.50));
     const cropX = Math.floor((vw - cropW) / 2);
     const cropY = Math.floor((vh - cropH) / 2);
 
@@ -208,8 +214,8 @@ export function BarcodeCameraModal({
       // Barcode not found in this pass
     }
 
-    // Pass 5: Every 3rd frame (~480ms), also check scaled down full frame (640x360)
-    // in case the user holds the barcode slightly outside the reticle box!
+    // Pass 5: Every 3rd frame (~480ms), check scaled down full frame (640x360)
+    // with strict formats, so no false positives are possible
     tickCountRef.current = (tickCountRef.current + 1) % 3;
     if (tickCountRef.current === 0) {
       try {
@@ -234,7 +240,6 @@ export function BarcodeCameraModal({
     const nextZoom = zoomLevel === 1 ? 2 : 1;
     setZoomLevel(nextZoom);
 
-    // If hardware optical/digital zoom is supported on device
     if (streamRef.current) {
       const track = streamRef.current.getVideoTracks()[0];
       if (track) {
@@ -247,10 +252,19 @@ export function BarcodeCameraModal({
             });
           }
         } catch (e) {
-          // Hardware zoom unsupported, canvas crop fallback handles it
+          // Hardware zoom unsupported, canvas crop handles it
         }
       }
     }
+  };
+
+  // Reset scan handling manually
+  const handleScanAgain = () => {
+    isHandlingRef.current = false;
+    setIsSearching(false);
+    setUnrecognizedCode(null);
+    setDetectedProduct(null);
+    setScanStatusText("Align barcode in box");
   };
 
   // Initialize Camera & Frame Loop
@@ -285,8 +299,8 @@ export function BarcodeCameraModal({
         const track = stream.getVideoTracks()[0];
         if (track) {
           const caps = (track.getCapabilities && track.getCapabilities()) as any;
-          if (caps) {
-            if ("torch" in caps) setHasTorch(true);
+          if (caps && "torch" in caps) {
+            setHasTorch(true);
           }
         }
 
@@ -306,11 +320,11 @@ export function BarcodeCameraModal({
 
         setHasCameraPermission(true);
 
-        // Initialize native BarcodeDetector if available (Chromium/Android)
+        // Initialize native BarcodeDetector if available (Chromium/Android/iOS 17+)
         if ("BarcodeDetector" in window) {
           try {
             nativeDetectorRef.current = new (window as any).BarcodeDetector({
-              formats: ["code_128", "ean_13", "ean_8", "qr_code", "upc_a", "upc_e", "code_39"],
+              formats: ["code_128", "ean_13", "ean_8", "upc_a", "upc_e", "qr_code"],
             });
           } catch (e) {
             nativeDetectorRef.current = null;
@@ -451,14 +465,24 @@ export function BarcodeCameraModal({
               {/* Aiming Reticle Frame (Unobstructed View - text label positioned ABOVE the box!) */}
               <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-4">
                 {/* Status Indicator Label placed ABOVE the box so it NEVER covers barcode lines */}
-                <div className="mb-2 text-[10px] font-bold text-lime-300 bg-slate-900/85 px-3 py-0.5 rounded-full border border-lime-500/30 backdrop-blur-sm shadow-md">
+                <div
+                  className={`mb-2 text-[10px] font-bold px-3 py-0.5 rounded-full border backdrop-blur-sm shadow-md transition-colors ${
+                    unrecognizedCode
+                      ? "text-amber-300 bg-amber-950/85 border-amber-500/40"
+                      : detectedProduct
+                      ? "text-emerald-300 bg-emerald-950/85 border-emerald-500/40"
+                      : "text-lime-300 bg-slate-900/85 border-lime-500/30"
+                  }`}
+                >
                   {scanStatusText}
                 </div>
 
                 <div
-                  className={`w-72 h-32 border-2 border-dashed rounded-2xl relative transition-all flex items-center justify-center ${
-                    isSearching
+                  className={`w-72 h-36 border-2 border-dashed rounded-2xl relative transition-all flex items-center justify-center ${
+                    detectedProduct
                       ? "border-emerald-400 bg-emerald-500/15 shadow-[0_0_35px_rgba(52,211,153,0.6)]"
+                      : unrecognizedCode
+                      ? "border-amber-400 bg-amber-500/15 shadow-[0_0_35px_rgba(251,191,36,0.5)]"
                       : "border-lime-400 shadow-[0_0_20px_rgba(163,230,53,0.3)]"
                   }`}
                 >
@@ -473,19 +497,32 @@ export function BarcodeCameraModal({
                 </div>
               </div>
 
-              {/* Manual Snap / Force Scan Button directly on Viewfinder */}
-              <button
-                type="button"
-                onClick={processFrameAndDecode}
-                className="absolute bottom-3 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full bg-slate-900/85 hover:bg-slate-900 text-lime-400 border border-lime-400/40 text-[11px] font-extrabold flex items-center gap-1.5 backdrop-blur-md shadow-lg active:scale-95 transition-transform"
-              >
-                <Zap className="w-3.5 h-3.5 text-lime-400" />
-                <span>Tap to Scan Now</span>
-              </button>
+              {/* Viewport Bottom Buttons */}
+              <div className="absolute bottom-3 inset-x-0 flex items-center justify-center gap-2 pointer-events-auto">
+                {unrecognizedCode ? (
+                  <button
+                    type="button"
+                    onClick={handleScanAgain}
+                    className="px-4 py-1.5 rounded-full bg-amber-500 hover:bg-amber-600 text-slate-950 border border-amber-300 text-[11px] font-black flex items-center gap-1.5 shadow-lg active:scale-95 transition-transform"
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>Scan Again</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={processFrameAndDecode}
+                    className="px-4 py-1.5 rounded-full bg-slate-900/85 hover:bg-slate-900 text-lime-400 border border-lime-400/40 text-[11px] font-extrabold flex items-center gap-1.5 backdrop-blur-md shadow-lg active:scale-95 transition-transform"
+                  >
+                    <Zap className="w-3.5 h-3.5 text-lime-400" />
+                    <span>Tap to Scan Now</span>
+                  </button>
+                )}
+              </div>
             </>
           )}
 
-          {/* Scanned Badge Notification Overlay */}
+          {/* Scanned Success Badge Overlay */}
           {detectedProduct && (
             <div className="absolute inset-x-4 bottom-4 bg-emerald-600/95 backdrop-blur-md text-white p-3 rounded-2xl flex items-center gap-2.5 text-xs shadow-xl animate-in slide-in-from-bottom-2 border border-emerald-400/40">
               <CheckCircle2 className="w-5 h-5 text-white shrink-0" />
@@ -494,6 +531,17 @@ export function BarcodeCameraModal({
                 <div className="text-[11px] opacity-90 font-mono font-bold">
                   ₹{detectedProduct.sellingPrice} • Stock: {detectedProduct.currentStock}
                 </div>
+              </div>
+            </div>
+          )}
+
+          {/* Unrecognized Barcode Overlay Banner */}
+          {unrecognizedCode && !detectedProduct && (
+            <div className="absolute inset-x-4 bottom-14 bg-amber-500/95 backdrop-blur-md text-slate-950 p-2.5 rounded-2xl flex items-center gap-2 text-xs shadow-xl animate-in slide-in-from-bottom-2 border border-amber-300 font-bold">
+              <AlertCircle className="w-4 h-4 text-slate-950 shrink-0" />
+              <div className="truncate">
+                <div className="font-black">Barcode: {unrecognizedCode}</div>
+                <div className="text-[10px] font-medium opacity-90">Not in catalog. Align product barcode.</div>
               </div>
             </div>
           )}
@@ -525,7 +573,7 @@ export function BarcodeCameraModal({
           <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[10px] text-slate-400 gap-1">
             <span className="flex items-center gap-1">
               <Sparkles className="w-3 h-3 text-lime-600" />
-              Dual-Binarizer Engine (Screen & Paper support)
+              Code 128, EAN-13, EAN-8 & QR (Strict Checksum Engine)
             </span>
             <span className="flex items-center gap-1 font-semibold text-lime-700">
               ⚡ 2x Zoom Available
