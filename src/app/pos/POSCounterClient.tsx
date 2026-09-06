@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import { VirtualizedProductGrid } from "@/components/pos/VirtualizedProductGrid";
 import { POSCart } from "@/components/pos/POSCart";
 import { PaymentModal } from "@/components/pos/PaymentModal";
@@ -86,7 +86,11 @@ export function POSCounterClient({
     }
   };
 
-  const handleCameraScanDetected = (barcode: string, product?: any) => {
+  const handleCloseCamera = useCallback(() => {
+    setIsCameraScannerOpen(false);
+  }, []);
+
+  const handleCameraScanDetected = useCallback((barcode: string, product?: any) => {
     if (product) {
       addItem(product, 1);
       toast.success(`Added "${product.name}" to cart!`);
@@ -101,7 +105,7 @@ export function POSCounterClient({
         toast.success(`Added "${matched.name}" to cart!`);
       }
     }
-  };
+  }, [addItem, initialProducts]);
 
   // Activate Hardware Barcode Scanner Listener
   useBarcodeScanner({
@@ -299,7 +303,7 @@ export function POSCounterClient({
       {/* Camera Barcode & QR Scanner Modal */}
       <BarcodeCameraModal
         isOpen={isCameraScannerOpen}
-        onClose={() => setIsCameraScannerOpen(false)}
+        onClose={handleCloseCamera}
         onDetected={handleCameraScanDetected}
         title="POS Camera Barcode Scanner"
       />

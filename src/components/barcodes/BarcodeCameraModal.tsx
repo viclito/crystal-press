@@ -56,11 +56,19 @@ export function BarcodeCameraModal({
   const multiFormatReaderRef = useRef<MultiFormatReader | null>(null);
   const nativeDetectorRef = useRef<any>(null);
   const scanIntervalRef = useRef<any>(null);
-  const tickCountRef = useRef(0);
   const isHandlingRef = useRef(false);
+  const isMatchedRef = useRef(false);
+
+  // Stable refs for callbacks to prevent parent re-renders from restarting the camera stream
+  const onDetectedRef = useRef(onDetected);
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onDetectedRef.current = onDetected;
+    onCloseRef.current = onClose;
+  });
 
   // Strict formats: Code 128 (Crystal Press), EAN/UPC (Retail standard)
-  // Exclude Code 39 & ITF to completely eliminate false-positive ghost reads from screen text / moiré
+  // Exclude Code 39 & ITF to eliminate false-positive ghost reads from screen text / moiré
   const getHints = useCallback(() => {
     const hints = new Map();
     const formats = [
@@ -79,7 +87,7 @@ export function BarcodeCameraModal({
   const handleCodeFound = useCallback(
     async (rawCode: string) => {
       const code = rawCode.trim();
-      if (!code || isHandlingRef.current) return;
+      if (!code || isHandlingRef.current || isMatchedRef.current) return;
       isHandlingRef.current = true;
       setIsSearching(true);
       setUnrecognizedCode(null);
@@ -88,67 +96,105 @@ export function BarcodeCameraModal({
       try {
         const res = await searchProductByBarcode(code);
         if (res.success && res.product) {
-          // Success: Matched item in database
+          // Success: Matched item in database!
+          isMatchedRef.current = true;
+
+          // Stop scanner interval and camera stream immediately so no further frames can process
+          if (scanIntervalRef.current) {
+            clearInterval(scanIntervalRef.current);
+            scanIntervalRef.current = null;
+          }
+          if (streamRef.current) {
+            streamRef.current.getTracks().forEach((t) => t.stop());
+          }
+
           playScannerBeep();
           if (typeof navigator !== "undefined" && navigator.vibrate) {
             navigator.vibrate([70, 40, 70]);
           }
           setDetectedProduct(res.product);
+          setUnrecognizedCode(null);
           setScanStatusText(`Matched: ${res.product.name}`);
-          onDetected(code, res.product);
+
+          // Deliver product to parent
+          onDetectedRef.current(code, res.product);
+
+          // Close modal smoothly after brief celebration
           setTimeout(() => {
-            onClose();
-          }, 750);
+            onCloseRef.current();
+          }, 650);
         } else {
-          // Unrecognized: Valid barcode format, but not found in catalog
+          // Barcode recognized by scanner format, but not in catalog
           playErrorBeep();
           setUnrecognizedCode(code);
           setScanStatusText(`Not Found: ${code}`);
           toast.warning(`Scanned: ${code} (Not found in catalog)`);
 
-          // 3.5s cooldown so it does not loop spam toasts
+          // 3s cooldown so it does not loop spam toasts
           setTimeout(() => {
-            isHandlingRef.current = false;
-            setIsSearching(false);
-            setUnrecognizedCode(null);
-            setScanStatusText("Align barcode in box");
-          }, 3500);
+            if (!isMatchedRef.current) {
+              isHandlingRef.current = false;
+              setIsSearching(false);
+              setUnrecognizedCode(null);
+              setScanStatusText("Align barcode in box");
+            }
+          }, 3000);
         }
       } catch (err) {
         playErrorBeep();
         setUnrecognizedCode(code);
         toast.error(`Scan lookup failed: ${code}`);
         setTimeout(() => {
-          isHandlingRef.current = false;
-          setIsSearching(false);
-          setUnrecognizedCode(null);
-          setScanStatusText("Align barcode in box");
-        }, 3500);
+          if (!isMatchedRef.current) {
+            isHandlingRef.current = false;
+            setIsSearching(false);
+            setUnrecognizedCode(null);
+            setScanStatusText("Align barcode in box");
+          }
+        }, 3000);
       }
     },
-    [onDetected, onClose]
+    []
   );
 
-  // Multi-pass Frame Decoder: reticle crop + screen moiré filtering + fallback full-frame
+  // Multi-pass Frame Decoder strictly on the cropped reticle target
   const processFrameAndDecode = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || isHandlingRef.current) return;
+    if (!video || !canvas || isHandlingRef.current || isMatchedRef.current) return;
 
     // Ensure video is actively playing and has valid dimensions
     if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
 
-    // Pass 1: Native Hardware BarcodeDetector (instant on Chromium, Android, and supported Safari)
+    // Crop strictly to the reticle box area so adjacent stickers are excluded
+    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.60 : 0.80));
+    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.40 : 0.48));
+    const cropX = Math.floor((vw - cropW) / 2);
+    const cropY = Math.floor((vh - cropH) / 2);
+
+    canvas.width = cropW;
+    canvas.height = cropH;
+    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+    // Pass 1: Native Hardware BarcodeDetector on the CROPPED CANVAS ONLY
+    // (Scanning cropped canvas guarantees only the sticker inside reticle is detected)
     if (nativeDetectorRef.current) {
       nativeDetectorRef.current
-        .detect(video)
+        .detect(canvas)
         .then((barcodes: any[]) => {
-          if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
+          if (
+            barcodes &&
+            barcodes.length > 0 &&
+            barcodes[0].rawValue &&
+            !isHandlingRef.current &&
+            !isMatchedRef.current
+          ) {
             handleCodeFound(barcodes[0].rawValue);
-            return;
           }
         })
         .catch(() => {});
@@ -162,25 +208,13 @@ export function BarcodeCameraModal({
     }
 
     const reader = multiFormatReaderRef.current;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
 
-    // Crop to the central reticle target with generous height to cover full sticker
-    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.65 : 0.85));
-    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.42 : 0.50));
-    const cropX = Math.floor((vw - cropW) / 2);
-    const cropY = Math.floor((vh - cropH) / 2);
-
-    canvas.width = cropW;
-    canvas.height = cropH;
-    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-
-    // Pass 2: ZXing GlobalHistogramBinarizer (specifically handles LCD computer screens, moiré, and low contrast)
+    // Pass 2: ZXing GlobalHistogramBinarizer (superior for computer monitors, moiré, and glare)
     try {
       const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas, false);
       const globalBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
       const res = reader.decode(globalBitmap);
-      if (res && res.getText()) {
+      if (res && res.getText() && !isHandlingRef.current && !isMatchedRef.current) {
         handleCodeFound(res.getText());
         return;
       }
@@ -188,12 +222,12 @@ export function BarcodeCameraModal({
       // Barcode not found in this pass
     }
 
-    // Pass 3: ZXing HybridBinarizer (superior for printed paper labels and high-contrast stickers)
+    // Pass 3: ZXing HybridBinarizer (superior for crisp printed thermal/paper labels)
     try {
       const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas, false);
       const hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
       const res = reader.decode(hybridBitmap);
-      if (res && res.getText()) {
+      if (res && res.getText() && !isHandlingRef.current && !isMatchedRef.current) {
         handleCodeFound(res.getText());
         return;
       }
@@ -201,37 +235,17 @@ export function BarcodeCameraModal({
       // Barcode not found in this pass
     }
 
-    // Pass 4: Inverted contrast pass (for dark themes or inverted labels)
+    // Pass 4: Inverted contrast pass
     try {
       const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas, true);
       const invertedBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
       const res = reader.decode(invertedBitmap);
-      if (res && res.getText()) {
+      if (res && res.getText() && !isHandlingRef.current && !isMatchedRef.current) {
         handleCodeFound(res.getText());
         return;
       }
     } catch (e) {
       // Barcode not found in this pass
-    }
-
-    // Pass 5: Every 3rd frame (~480ms), check scaled down full frame (640x360)
-    // with strict formats, so no false positives are possible
-    tickCountRef.current = (tickCountRef.current + 1) % 3;
-    if (tickCountRef.current === 0) {
-      try {
-        canvas.width = 640;
-        canvas.height = 360;
-        ctx.drawImage(video, 0, 0, 640, 360);
-        const fullSource = new HTMLCanvasElementLuminanceSource(canvas, false);
-        const fullBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(fullSource));
-        const res = reader.decode(fullBitmap);
-        if (res && res.getText()) {
-          handleCodeFound(res.getText());
-          return;
-        }
-      } catch (e) {
-        // Barcode not found
-      }
     }
   }, [getHints, handleCodeFound, zoomLevel]);
 
@@ -261,17 +275,24 @@ export function BarcodeCameraModal({
   // Reset scan handling manually
   const handleScanAgain = () => {
     isHandlingRef.current = false;
+    isMatchedRef.current = false;
     setIsSearching(false);
     setUnrecognizedCode(null);
     setDetectedProduct(null);
     setScanStatusText("Align barcode in box");
   };
 
-  // Initialize Camera & Frame Loop
+  // Initialize Camera & Frame Loop - strictly controlled by isOpen only!
   useEffect(() => {
     if (!isOpen) return;
 
+    isMatchedRef.current = false;
     isHandlingRef.current = false;
+    setIsSearching(false);
+    setDetectedProduct(null);
+    setUnrecognizedCode(null);
+    setScanStatusText("Align barcode in box");
+
     let activeStream: MediaStream | null = null;
 
     const startCamera = async () => {
@@ -355,7 +376,7 @@ export function BarcodeCameraModal({
         streamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [isOpen, handleCodeFound, processFrameAndDecode]);
+  }, [isOpen, processFrameAndDecode]);
 
   // Torch Toggle
   const toggleTorch = async () => {
@@ -508,7 +529,7 @@ export function BarcodeCameraModal({
                     <RefreshCw className="w-3.5 h-3.5" />
                     <span>Scan Again</span>
                   </button>
-                ) : (
+                ) : !detectedProduct ? (
                   <button
                     type="button"
                     onClick={processFrameAndDecode}
@@ -517,7 +538,7 @@ export function BarcodeCameraModal({
                     <Zap className="w-3.5 h-3.5 text-lime-400" />
                     <span>Tap to Scan Now</span>
                   </button>
-                )}
+                ) : null}
               </div>
             </>
           )}
