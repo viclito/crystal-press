@@ -30,8 +30,8 @@ export function useBarcodeScanner({
       const diff = currentTime - lastKeyTimeRef.current;
       lastKeyTimeRef.current = currentTime;
 
-      // Barcode scanners type at hardware burst speeds (< 35ms between characters)
-      if (diff > 45) {
+      // Barcode scanners type at hardware burst speeds (usually 10-50ms between characters)
+      if (diff > 75) {
         bufferRef.current = ""; // Reset buffer if normal human typing cadence
       }
 
