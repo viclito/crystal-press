@@ -6,22 +6,20 @@ import {
   Camera,
   Scan,
   CheckCircle2,
-  AlertCircle,
-  Volume2,
   Flashlight,
   FlashlightOff,
   Sparkles,
-  RefreshCw,
   Zap,
+  ZoomIn,
 } from "lucide-react";
 import {
-  BrowserMultiFormatReader,
   BarcodeFormat,
   DecodeHintType,
-  RGBLuminanceSource,
   BinaryBitmap,
   HybridBinarizer,
+  GlobalHistogramBinarizer,
   MultiFormatReader,
+  HTMLCanvasElementLuminanceSource,
 } from "@zxing/library";
 import { searchProductByBarcode } from "@/actions/barcodes";
 import { playScannerBeep, playErrorBeep } from "@/hooks/useBarcodeScanner";
@@ -46,16 +44,16 @@ export function BarcodeCameraModal({
   const [detectedProduct, setDetectedProduct] = useState<any | null>(null);
   const [hasTorch, setHasTorch] = useState(false);
   const [isTorchOn, setIsTorchOn] = useState(false);
-  const [isScanningActive, setIsScanningActive] = useState(true);
-  const [lastScannedCode, setLastScannedCode] = useState<string | null>(null);
+  const [zoomLevel, setZoomLevel] = useState<1 | 2>(1);
+  const [scanStatusText, setScanStatusText] = useState<string>("Align barcode in box");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const codeReaderRef = useRef<BrowserMultiFormatReader | null>(null);
   const multiFormatReaderRef = useRef<MultiFormatReader | null>(null);
   const nativeDetectorRef = useRef<any>(null);
   const scanIntervalRef = useRef<any>(null);
+  const tickCountRef = useRef(0);
   const isHandlingRef = useRef(false);
 
   // Configure Hints for ZXing
@@ -84,15 +82,15 @@ export function BarcodeCameraModal({
       if (!code || isHandlingRef.current) return;
       isHandlingRef.current = true;
       setIsSearching(true);
-      setLastScannedCode(code);
+      setScanStatusText(`Detected: ${code}`);
 
       // Play scanner audio & haptic feedback on phones
       playScannerBeep();
       if (typeof navigator !== "undefined" && navigator.vibrate) {
-        navigator.vibrate([60, 40, 60]);
+        navigator.vibrate([70, 40, 70]);
       }
 
-      toast.info(`Scanned Barcode: ${code}`, "Barcode Detected");
+      toast.info(`Scanned: ${code}`, "Barcode Detected");
 
       try {
         const res = await searchProductByBarcode(code);
@@ -109,6 +107,7 @@ export function BarcodeCameraModal({
           setTimeout(() => {
             isHandlingRef.current = false;
             setIsSearching(false);
+            setScanStatusText("Align barcode in box");
           }, 1500);
         }
       } catch (err) {
@@ -116,39 +115,29 @@ export function BarcodeCameraModal({
         setTimeout(() => {
           isHandlingRef.current = false;
           setIsSearching(false);
+          setScanStatusText("Align barcode in box");
         }, 1500);
       }
     },
     [onDetected, onClose]
   );
 
-  // Manual Frame Capture & Reticle Decoder (Highly effective for iOS & multiple stickers)
-  const captureAndDecodeFrame = useCallback(() => {
+  // Multi-pass Frame Decoder: reticle crop + screen moiré filtering + fallback full-frame
+  const processFrameAndDecode = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas || video.readyState < 2 || isHandlingRef.current) return;
+    if (!video || !canvas || isHandlingRef.current) return;
+
+    // Ensure video is actively playing and has valid dimensions
+    if (video.readyState < 2 || video.videoWidth === 0 || video.videoHeight === 0) return;
 
     const vw = video.videoWidth;
     const vh = video.videoHeight;
-    if (!vw || !vh) return;
 
-    // 1. First attempt: Crop to center reticle (75% width, 45% height) to isolate target sticker
-    const cropW = Math.floor(vw * 0.75);
-    const cropH = Math.floor(vh * 0.45);
-    const cropX = Math.floor((vw - cropW) / 2);
-    const cropY = Math.floor((vh - cropH) / 2);
-
-    canvas.width = cropW;
-    canvas.height = cropH;
-    const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    if (!ctx) return;
-
-    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
-
-    // Try native BarcodeDetector on cropped canvas if available (Android/Chrome)
+    // Pass 1: Native Hardware BarcodeDetector (instant on Chromium, Android, and supported Safari)
     if (nativeDetectorRef.current) {
       nativeDetectorRef.current
-        .detect(canvas)
+        .detect(video)
         .then((barcodes: any[]) => {
           if (barcodes && barcodes.length > 0 && barcodes[0].rawValue) {
             handleCodeFound(barcodes[0].rawValue);
@@ -158,35 +147,118 @@ export function BarcodeCameraModal({
         .catch(() => {});
     }
 
-    // Decode with ZXing MultiFormatReader from Canvas Pixels (iOS Safari & universal fallback)
+    // Initialize ZXing MultiFormatReader if not yet done
+    if (!multiFormatReaderRef.current) {
+      const reader = new MultiFormatReader();
+      reader.setHints(getHints());
+      multiFormatReaderRef.current = reader;
+    }
+
+    const reader = multiFormatReaderRef.current;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    if (!ctx) return;
+
+    // Crop to the central reticle target
+    // In 2x zoom mode: focus tighter; In 1x mode: capture ~82% width, 38% height
+    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.55 : 0.82));
+    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.28 : 0.38));
+    const cropX = Math.floor((vw - cropW) / 2);
+    const cropY = Math.floor((vh - cropH) / 2);
+
+    canvas.width = cropW;
+    canvas.height = cropH;
+    ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
+
+    // Pass 2: ZXing GlobalHistogramBinarizer (specifically handles LCD computer screens, moiré, and low contrast)
     try {
-      if (!multiFormatReaderRef.current) {
-        const reader = new MultiFormatReader();
-        reader.setHints(getHints());
-        multiFormatReaderRef.current = reader;
-      }
-
-      const imgData = ctx.getImageData(0, 0, cropW, cropH);
-      const luminance = new RGBLuminanceSource(imgData.data, cropW, cropH);
-      const bitmap = new BinaryBitmap(new HybridBinarizer(luminance));
-      const result = multiFormatReaderRef.current.decode(bitmap);
-
-      if (result && result.getText()) {
-        handleCodeFound(result.getText());
+      const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas, false);
+      const globalBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
+      const res = reader.decode(globalBitmap);
+      if (res && res.getText()) {
+        handleCodeFound(res.getText());
         return;
       }
     } catch (e) {
-      // Not found in cropped frame, ignore
+      // Barcode not found in this pass
     }
-  }, [getHints, handleCodeFound]);
 
-  // Initialize Camera & Scanner
+    // Pass 3: ZXing HybridBinarizer (superior for printed paper labels and high-contrast stickers)
+    try {
+      const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas, false);
+      const hybridBitmap = new BinaryBitmap(new HybridBinarizer(luminanceSource));
+      const res = reader.decode(hybridBitmap);
+      if (res && res.getText()) {
+        handleCodeFound(res.getText());
+        return;
+      }
+    } catch (e) {
+      // Barcode not found in this pass
+    }
+
+    // Pass 4: Inverted contrast pass (for dark themes or inverted labels)
+    try {
+      const luminanceSource = new HTMLCanvasElementLuminanceSource(canvas, true);
+      const invertedBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(luminanceSource));
+      const res = reader.decode(invertedBitmap);
+      if (res && res.getText()) {
+        handleCodeFound(res.getText());
+        return;
+      }
+    } catch (e) {
+      // Barcode not found in this pass
+    }
+
+    // Pass 5: Every 3rd frame (~480ms), also check scaled down full frame (640x360)
+    // in case the user holds the barcode slightly outside the reticle box!
+    tickCountRef.current = (tickCountRef.current + 1) % 3;
+    if (tickCountRef.current === 0) {
+      try {
+        canvas.width = 640;
+        canvas.height = 360;
+        ctx.drawImage(video, 0, 0, 640, 360);
+        const fullSource = new HTMLCanvasElementLuminanceSource(canvas, false);
+        const fullBitmap = new BinaryBitmap(new GlobalHistogramBinarizer(fullSource));
+        const res = reader.decode(fullBitmap);
+        if (res && res.getText()) {
+          handleCodeFound(res.getText());
+          return;
+        }
+      } catch (e) {
+        // Barcode not found
+      }
+    }
+  }, [getHints, handleCodeFound, zoomLevel]);
+
+  // Set Zoom
+  const handleToggleZoom = async () => {
+    const nextZoom = zoomLevel === 1 ? 2 : 1;
+    setZoomLevel(nextZoom);
+
+    // If hardware optical/digital zoom is supported on device
+    if (streamRef.current) {
+      const track = streamRef.current.getVideoTracks()[0];
+      if (track) {
+        try {
+          const caps = (track.getCapabilities && track.getCapabilities()) as any;
+          if (caps && "zoom" in caps) {
+            const targetZoom = nextZoom === 2 ? Math.min(caps.zoom.max || 2, 2.0) : 1.0;
+            await (track as any).applyConstraints({
+              advanced: [{ zoom: targetZoom }],
+            });
+          }
+        } catch (e) {
+          // Hardware zoom unsupported, canvas crop fallback handles it
+        }
+      }
+    }
+  };
+
+  // Initialize Camera & Frame Loop
   useEffect(() => {
     if (!isOpen) return;
 
     isHandlingRef.current = false;
     let activeStream: MediaStream | null = null;
-    let activeCodeReader: BrowserMultiFormatReader | null = null;
 
     const startCamera = async () => {
       try {
@@ -195,7 +267,7 @@ export function BarcodeCameraModal({
           return;
         }
 
-        // Request high resolution back camera with autofocus
+        // Request back camera with continuous autofocus and high resolution
         const constraints: MediaStreamConstraints = {
           video: {
             facingMode: { ideal: "environment" },
@@ -209,30 +281,32 @@ export function BarcodeCameraModal({
         activeStream = stream;
         streamRef.current = stream;
 
-        // Check torch capability
+        // Check capabilities (torch, zoom)
         const track = stream.getVideoTracks()[0];
         if (track) {
           const caps = (track.getCapabilities && track.getCapabilities()) as any;
-          if (caps && "torch" in caps) {
-            setHasTorch(true);
+          if (caps) {
+            if ("torch" in caps) setHasTorch(true);
           }
         }
 
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          videoRef.current.setAttribute("playsinline", "true");
-          videoRef.current.setAttribute("autoplay", "true");
-          videoRef.current.setAttribute("muted", "true");
+        const video = videoRef.current;
+        if (video) {
+          video.srcObject = stream;
+          video.setAttribute("playsinline", "true");
+          video.setAttribute("autoplay", "true");
+          video.setAttribute("muted", "true");
+
           try {
-            await videoRef.current.play();
+            await video.play();
           } catch (playErr) {
-            console.warn("Video play error:", playErr);
+            console.warn("Autoplay error:", playErr);
           }
         }
 
         setHasCameraPermission(true);
 
-        // 1. Initialize native BarcodeDetector if available
+        // Initialize native BarcodeDetector if available (Chromium/Android)
         if ("BarcodeDetector" in window) {
           try {
             nativeDetectorRef.current = new (window as any).BarcodeDetector({
@@ -243,35 +317,12 @@ export function BarcodeCameraModal({
           }
         }
 
-        // 2. Initialize ZXing BrowserMultiFormatReader for universal scanning (iOS Safari + Android + Desktop)
-        try {
-          const hints = getHints();
-          activeCodeReader = new BrowserMultiFormatReader(hints, 250);
-          codeReaderRef.current = activeCodeReader;
-
-          if (videoRef.current) {
-            activeCodeReader.decodeFromVideoElementContinuously(
-              videoRef.current,
-              (result, error) => {
-                if (result && !isHandlingRef.current) {
-                  const code = result.getText();
-                  if (code) {
-                    handleCodeFound(code);
-                  }
-                }
-              }
-            );
-          }
-        } catch (zxingErr) {
-          console.warn("ZXing continuous reader init fallback:", zxingErr);
-        }
-
-        // 3. Interval Scanner on Reticle Crop (ensures fast scanning of targeted sticker in multi-sticker view)
+        // Run multi-pass scanning loop every 160ms (~6 fps, fast and lightweight)
         scanIntervalRef.current = setInterval(() => {
-          captureAndDecodeFrame();
-        }, 300);
+          processFrameAndDecode();
+        }, 160);
       } catch (err: any) {
-        console.warn("Camera access failed:", err);
+        console.warn("Camera start failed:", err);
         setHasCameraPermission(false);
       }
     };
@@ -283,39 +334,29 @@ export function BarcodeCameraModal({
         clearInterval(scanIntervalRef.current);
         scanIntervalRef.current = null;
       }
-      if (activeCodeReader) {
-        try {
-          activeCodeReader.reset();
-        } catch (e) {}
-      }
-      if (codeReaderRef.current) {
-        try {
-          codeReaderRef.current.reset();
-        } catch (e) {}
-      }
       if (activeStream) {
-        activeStream.getTracks().forEach((track) => track.stop());
+        activeStream.getTracks().forEach((t) => t.stop());
       }
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current.getTracks().forEach((t) => t.stop());
       }
     };
-  }, [isOpen, getHints, handleCodeFound, captureAndDecodeFrame]);
+  }, [isOpen, handleCodeFound, processFrameAndDecode]);
 
-  // Torch Toggle Function
+  // Torch Toggle
   const toggleTorch = async () => {
     if (!streamRef.current) return;
     const track = streamRef.current.getVideoTracks()[0];
     if (!track) return;
 
     try {
-      const nextState = !isTorchOn;
+      const next = !isTorchOn;
       await (track as any).applyConstraints({
-        advanced: [{ torch: nextState }],
+        advanced: [{ torch: next }],
       });
-      setIsTorchOn(nextState);
+      setIsTorchOn(next);
     } catch (e) {
-      console.warn("Failed to toggle flashlight:", e);
+      console.warn("Torch failed:", e);
     }
   };
 
@@ -342,7 +383,22 @@ export function BarcodeCameraModal({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5">
+            {/* 2x Zoom Toggle Button (Crucial for screen scanning & small stickers) */}
+            <button
+              type="button"
+              onClick={handleToggleZoom}
+              className={`px-2.5 py-1.5 rounded-xl border text-xs font-black transition-all flex items-center gap-1 ${
+                zoomLevel === 2
+                  ? "bg-lime-400 border-lime-500 text-slate-950 shadow-sm"
+                  : "bg-white border-slate-200 text-slate-700 hover:bg-slate-100"
+              }`}
+              title="Toggle 2x Zoom"
+            >
+              <ZoomIn className="w-3.5 h-3.5" />
+              <span>{zoomLevel}x</span>
+            </button>
+
             {hasTorch && (
               <button
                 type="button"
@@ -384,18 +440,25 @@ export function BarcodeCameraModal({
                 playsInline
                 autoPlay
                 muted
-                className="w-full h-full object-cover"
+                className={`w-full h-full object-cover transition-transform duration-200 ${
+                  zoomLevel === 2 ? "scale-125" : "scale-100"
+                }`}
               />
 
               {/* Hidden Canvas for High-Precision Reticle Frame Analysis */}
               <canvas ref={canvasRef} className="hidden" />
 
-              {/* Aiming Reticle Frame */}
-              <div className="absolute inset-0 pointer-events-none flex items-center justify-center p-4">
+              {/* Aiming Reticle Frame (Unobstructed View - text label positioned ABOVE the box!) */}
+              <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-4">
+                {/* Status Indicator Label placed ABOVE the box so it NEVER covers barcode lines */}
+                <div className="mb-2 text-[10px] font-bold text-lime-300 bg-slate-900/85 px-3 py-0.5 rounded-full border border-lime-500/30 backdrop-blur-sm shadow-md">
+                  {scanStatusText}
+                </div>
+
                 <div
-                  className={`w-64 sm:w-72 h-36 border-2 border-dashed rounded-2xl relative transition-all flex items-center justify-center ${
+                  className={`w-72 h-32 border-2 border-dashed rounded-2xl relative transition-all flex items-center justify-center ${
                     isSearching
-                      ? "border-emerald-400 bg-emerald-500/10 shadow-[0_0_30px_rgba(52,211,153,0.5)]"
+                      ? "border-emerald-400 bg-emerald-500/15 shadow-[0_0_35px_rgba(52,211,153,0.6)]"
                       : "border-lime-400 shadow-[0_0_20px_rgba(163,230,53,0.3)]"
                   }`}
                 >
@@ -403,25 +466,21 @@ export function BarcodeCameraModal({
                   <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-lime-400 to-transparent shadow-[0_0_10px_#a3e635] animate-pulse" />
 
                   {/* Corner Accent Brackets */}
-                  <div className="absolute -top-1 -left-1 w-3 h-3 border-t-2 border-l-2 border-lime-300" />
-                  <div className="absolute -top-1 -right-1 w-3 h-3 border-t-2 border-r-2 border-lime-300" />
-                  <div className="absolute -bottom-1 -left-1 w-3 h-3 border-b-2 border-l-2 border-lime-300" />
-                  <div className="absolute -bottom-1 -right-1 w-3 h-3 border-b-2 border-r-2 border-lime-300" />
-
-                  <span className="absolute bottom-2 text-[9px] font-bold text-lime-300 bg-slate-900/85 px-2.5 py-0.5 rounded-full border border-lime-500/30">
-                    ALIGN BARCODE HERE
-                  </span>
+                  <div className="absolute -top-1 -left-1 w-3.5 h-3.5 border-t-2 border-l-2 border-lime-300" />
+                  <div className="absolute -top-1 -right-1 w-3.5 h-3.5 border-t-2 border-r-2 border-lime-300" />
+                  <div className="absolute -bottom-1 -left-1 w-3.5 h-3.5 border-b-2 border-l-2 border-lime-300" />
+                  <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 border-b-2 border-r-2 border-lime-300" />
                 </div>
               </div>
 
               {/* Manual Snap / Force Scan Button directly on Viewfinder */}
               <button
                 type="button"
-                onClick={captureAndDecodeFrame}
-                className="absolute bottom-3 left-1/2 -translate-x-1/2 px-3 py-1.5 rounded-full bg-slate-900/80 hover:bg-slate-900 text-lime-400 border border-lime-400/40 text-[10px] font-extrabold flex items-center gap-1.5 backdrop-blur-md shadow-lg active:scale-95 transition-transform"
+                onClick={processFrameAndDecode}
+                className="absolute bottom-3 left-1/2 -translate-x-1/2 px-4 py-1.5 rounded-full bg-slate-900/85 hover:bg-slate-900 text-lime-400 border border-lime-400/40 text-[11px] font-extrabold flex items-center gap-1.5 backdrop-blur-md shadow-lg active:scale-95 transition-transform"
               >
                 <Zap className="w-3.5 h-3.5 text-lime-400" />
-                <span>Tap to Focus & Scan</span>
+                <span>Tap to Scan Now</span>
               </button>
             </>
           )}
@@ -440,7 +499,7 @@ export function BarcodeCameraModal({
           )}
         </div>
 
-        {/* Manual Barcode Fallback Box */}
+        {/* Help Tip & Manual Barcode Fallback Box */}
         <div className="p-4 bg-slate-50 border-t border-slate-100 space-y-3">
           <form onSubmit={handleManualSubmit} className="flex items-center gap-2">
             <div className="relative flex-1">
@@ -463,13 +522,13 @@ export function BarcodeCameraModal({
             </button>
           </form>
 
-          <div className="flex items-center justify-between text-[10px] text-slate-400">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between text-[10px] text-slate-400 gap-1">
             <span className="flex items-center gap-1">
               <Sparkles className="w-3 h-3 text-lime-600" />
-              Universal 1D/2D Engine (iOS + Android)
+              Dual-Binarizer Engine (Screen & Paper support)
             </span>
             <span className="flex items-center gap-1 font-semibold text-lime-700">
-              <Volume2 className="w-3 h-3" /> Audio Beep Active
+              ⚡ 2x Zoom Available
             </span>
           </div>
         </div>
