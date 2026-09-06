@@ -1,0 +1,778 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+// ----------------------------------------------------
+// ENUMS
+// ----------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  MANAGER
+  CASHIER
+}
+
+enum JobStatus {
+  ORDER_PLACED
+  DESIGNING
+  PROOF_APPROVAL
+  PRINTING
+  FINISHING
+  READY_FOR_PICKUP
+  DELIVERED
+  CANCELLED
+}
+
+enum InvoiceType {
+  POS_COUNTER
+  DESKTOP_DETAILED
+  JOB_ORDER_FINAL
+}
+
+enum InvoiceStatus {
+  COMPLETED
+  HELD
+  CANCELLED
+  REFUNDED
+}
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  CREDIT_UDHAAR
+  SPLIT
+  WALLET
+}
+
+enum StockAdjustmentType {
+  PURCHASE_RESTOCK
+  SALE_DEDUCTION
+  PRINT_SPOILAGE
+  DAMAGE_WASTAGE
+  MANUAL_CORRECTION
+  RETURN_RESTOCK
+}
+
+enum QuotationStatus {
+  DRAFT
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CONVERTED
+}
+
+enum ChallanStatus {
+  PREPARED
+  IN_TRANSIT
+  DELIVERED
+  CANCELLED
+}
+
+enum DispatchMode {
+  SHOP_PICKUP
+  COMPANY_VEHICLE
+  TRANSPORTER
+  COURIER
+}
+
+// ----------------------------------------------------
+// USER & AUDIT LOGS
+// ----------------------------------------------------
+
+model User {
+  id            String         @id @default(uuid())
+  username      String         @unique
+  fullName      String         @map("full_name")
+  passwordHash  String         @map("password_hash")
+  role          UserRole       @default(CASHIER)
+  isActive      Boolean        @default(true) @map("is_active")
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+
+  invoices      Invoice[]
+  jobOrders     JobOrder[]
+  auditLogs     AuditLog[]
+  adjustments   StockAdjustment[]
+  expenses      Expense[]
+  quotations    Quotation[]
+  deliveryChallans DeliveryChallan[]
+  openedShifts     CashShift[]       @relation("ShiftOpenedBy")
+  closedShifts     CashShift[]       @relation("ShiftClosedBy")
+
+  @@map("users")
+}
+
+model AuditLog {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  action      String   // INVOICE_CANCELLED, PRICE_OVERRIDE, STOCK_ADJUST
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  oldValues   Json?    @map("old_values")
+  newValues   Json?    @map("new_values")
+  ipAddress   String?  @map("ip_address")
+  timestamp   DateTime @default(now())
+
+  user        User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([entityType, entityId])
+  @@index([userId, timestamp(sort: Desc)])
+  @@map("audit_logs")
+}
+
+// ----------------------------------------------------
+// MASTER DATA
+// ----------------------------------------------------
+
+model Category {
+  id            String        @id @default(uuid())
+  name          String        @unique
+  slug          String        @unique
+  displayOrder  Int           @default(0) @map("display_order")
+  isActive      Boolean       @default(true) @map("is_active")
+  createdAt     DateTime      @default(now()) @map("created_at")
+
+  subCategories SubCategory[]
+
+  @@map("categories")
+}
+
+model SubCategory {
+  id          String    @id @default(uuid())
+  categoryId  String    @map("category_id")
+  name        String
+  slug        String
+  displayOrder Int      @default(0) @map("display_order")
+  isActive    Boolean   @default(true) @map("is_active")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  category    Category  @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+  products    Product[]
+
+  @@unique([categoryId, name])
+  @@index([categoryId, isActive])
+  @@map("sub_categories")
+}
+
+model Unit {
+  id             String    @id @default(uuid())
+  code           String    @unique // pcs, ream, box, roll, sq_ft
+  name           String    // Pieces, Ream (500s), Box
+  allowsFraction Boolean   @default(false) @map("allows_fraction")
+  isActive       Boolean   @default(true) @map("is_active")
+
+  products       Product[]
+
+  @@map("units")
+}
+
+model Product {
+  id             String            @id @default(uuid())
+  skuCode        String            @unique @map("sku_code")
+  barcode        String?           @unique
+  name           String
+  subCategoryId  String            @map("sub_category_id")
+  unitId         String            @map("unit_id")
+  
+  costPrice      Decimal           @default(0.00) @map("cost_price") @db.Decimal(12, 2)
+  sellingPrice   Decimal           @map("selling_price") @db.Decimal(12, 2)
+  currentStock   Decimal           @default(0.00) @map("current_stock") @db.Decimal(12, 2)
+  minStockAlert  Decimal           @default(10.00) @map("min_stock_alert") @db.Decimal(12, 2)
+  
+  taxPercent     Decimal           @default(0.00) @map("tax_percent") @db.Decimal(5, 2)
+  
+  imageUrl       String?           @map("image_url")
+  isActive       Boolean           @default(true) @map("is_active")
+  version        Int               @default(0) // Optimistic concurrency locking
+  createdAt      DateTime          @default(now()) @map("created_at")
+  updatedAt      DateTime          @updatedAt @map("updated_at")
+
+  subCategory    SubCategory       @relation(fields: [subCategoryId], references: [id], onDelete: Restrict)
+  unit           Unit              @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  invoiceItems   InvoiceItem[]
+  purchaseItems  PurchaseOrderItem[]
+  adjustments    StockAdjustment[]
+  quotationItems QuotationItem[]
+
+  @@index([barcode])
+  @@index([skuCode])
+  @@index([subCategoryId, isActive])
+  @@index([currentStock, minStockAlert])
+  @@map("products")
+}
+
+model Customer {
+  id              String            @id @default(uuid())
+  name            String
+  phone           String?
+  email           String?
+  address         String?
+  currentBalance  Decimal           @default(0.00) @map("current_balance") @db.Decimal(12, 2) // > 0 means Udhaar due
+  creditLimit     Decimal           @default(0.00) @map("credit_limit") @db.Decimal(12, 2)
+  walletBalance   Decimal           @default(0.00) @map("wallet_balance") @db.Decimal(12, 2) // Store credit balance
+  loyaltyPoints   Int               @default(0) @map("loyalty_points")
+  notes           String?
+  isActive        Boolean           @default(true) @map("is_active")
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  invoices        Invoice[]
+  jobOrders       JobOrder[]
+  payments        CustomerPayment[]
+  ledgerEntries   CustomerLedger[]
+  quotations      Quotation[]
+  deliveryChallans DeliveryChallan[]
+  walletTransactions CustomerWalletTransaction[]
+
+  @@index([phone])
+  @@index([name])
+  @@index([currentBalance])
+  @@map("customers")
+}
+
+model Vendor {
+  id                 String              @id @default(uuid())
+  name               String
+  contactPerson      String?             @map("contact_person")
+  phone              String?
+  address            String?
+  outstandingBalance Decimal             @default(0.00) @map("outstanding_balance") @db.Decimal(12, 2)
+  isActive           Boolean             @default(true) @map("is_active")
+  createdAt          DateTime            @default(now()) @map("created_at")
+
+  purchaseOrders     PurchaseOrder[]
+  vendorPayments     VendorPayment[]
+
+  @@map("vendors")
+}
+
+// ----------------------------------------------------
+// CUSTOM PRINTING JOB ORDERS
+// ----------------------------------------------------
+
+model JobOrder {
+  id                   String               @id @default(uuid())
+  jobOrderNumber       String               @unique @map("job_order_number") // JO-2026-0001
+  customerId           String?              @map("customer_id")
+  customerName         String               @map("customer_name")
+  customerPhone        String?              @map("customer_phone")
+  
+  jobType              String               @map("job_type") // Visiting Card, Wedding Card, Banner
+  specifications       Json                 // { size: "3.5x2", paper: "350gsm Matte", color: "4+4", sides: 2 }
+  quantity             Int
+  unitName             String               @default("pcs") @map("unit_name")
+  
+  totalAmount          Decimal              @map("total_amount") @db.Decimal(12, 2)
+  advancePaid          Decimal              @default(0.00) @map("advance_paid") @db.Decimal(12, 2)
+  balanceDue           Decimal              @default(0.00) @map("balance_due") @db.Decimal(12, 2)
+  
+  status               JobStatus            @default(ORDER_PLACED)
+  proofApproved        Boolean              @default(false) @map("proof_approved")
+  proofApprovedAt      DateTime?            @map("proof_approved_at")
+  proofRejectedAt      DateTime?            @map("proof_rejected_at")
+  customerFeedback     String?              @map("customer_feedback")
+  clientApprovedName   String?              @map("client_approved_name")
+  designNotes          String?              @map("design_notes")
+  
+  expectedDeliveryDate DateTime?            @map("expected_delivery_date")
+  deliveredAt          DateTime?            @map("delivered_at")
+  
+  createdById          String               @map("created_by_id")
+  createdAt            DateTime             @default(now()) @map("created_at")
+  updatedAt            DateTime             @updatedAt @map("updated_at")
+
+  customer             Customer?            @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy            User                 @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  attachments          JobOrderAttachment[]
+  invoices             Invoice[]
+  deliveryChallans     DeliveryChallan[]
+
+  @@index([status, expectedDeliveryDate])
+  @@index([customerId, status])
+  @@index([customerPhone])
+  @@map("job_orders")
+}
+
+model JobOrderAttachment {
+  id          String   @id @default(uuid())
+  jobOrderId  String   @map("job_order_id")
+  fileUrl     String   @map("file_url")
+  fileName    String   @map("file_name")
+  fileType    String   @map("file_type")
+  isProof     Boolean  @default(false) @map("is_proof")
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  jobOrder    JobOrder @relation(fields: [jobOrderId], references: [id], onDelete: Cascade)
+
+  @@map("job_order_attachments")
+}
+
+// ----------------------------------------------------
+// INVOICING & BILLING
+// ----------------------------------------------------
+
+model Invoice {
+  id               String            @id @default(uuid())
+  invoiceNumber    String            @unique @map("invoice_number") // CP-2026-0001
+  invoiceType      InvoiceType       @default(POS_COUNTER) @map("invoice_type")
+  
+  customerId       String?           @map("customer_id")
+  customerName     String            @default("Walk-in Customer") @map("customer_name")
+  customerPhone    String?           @map("customer_phone")
+  
+  jobOrderId       String?           @map("job_order_id")
+  
+  subTotal         Decimal           @map("sub_total") @db.Decimal(12, 2)
+  discountAmount   Decimal           @default(0.00) @map("discount_amount") @db.Decimal(12, 2)
+  taxAmount        Decimal           @default(0.00) @map("tax_amount") @db.Decimal(12, 2)
+  roundOff         Decimal           @default(0.00) @map("round_off") @db.Decimal(12, 2)
+  netTotal         Decimal           @map("net_total") @db.Decimal(12, 2)
+  
+  paidAmount       Decimal           @default(0.00) @map("paid_amount") @db.Decimal(12, 2)
+  balanceDue       Decimal           @default(0.00) @map("balance_due") @db.Decimal(12, 2) // Credited to Udhaar
+  
+  pointsEarned     Int               @default(0) @map("points_earned")
+  pointsRedeemed   Int               @default(0) @map("points_redeemed")
+  pointsDiscount   Decimal           @default(0.00) @map("points_discount") @db.Decimal(12, 2)
+  walletPaid       Decimal           @default(0.00) @map("wallet_paid") @db.Decimal(12, 2)
+
+  paymentMethod    PaymentMethod     @default(CASH) @map("payment_method")
+  status           InvoiceStatus     @default(COMPLETED)
+  
+  notes            String?
+  createdById      String            @map("created_by_id")
+  createdAt        DateTime          @default(now()) @map("created_at")
+  updatedAt        DateTime          @updatedAt @map("updated_at")
+
+  customer         Customer?         @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  jobOrder         JobOrder?         @relation(fields: [jobOrderId], references: [id], onDelete: SetNull)
+  createdBy        User              @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  items            InvoiceItem[]
+  payments         CustomerPayment[]
+
+  @@index([createdAt(sort: Desc)])
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([createdById, createdAt])
+  @@index([status])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id              String    @id @default(uuid())
+  invoiceId       String    @map("invoice_id")
+  productId       String?   @map("product_id")
+  itemDescription String    @map("item_description")
+  unitName        String    @default("pcs") @map("unit_name")
+  
+  quantity        Decimal   @db.Decimal(12, 2)
+  unitCostPrice   Decimal   @default(0.00) @map("unit_cost_price") @db.Decimal(12, 2)
+  unitSalePrice   Decimal   @map("unit_sale_price") @db.Decimal(12, 2)
+  discountAmount  Decimal   @default(0.00) @map("discount_amount") @db.Decimal(12, 2)
+  taxPercent      Decimal   @default(0.00) @map("tax_percent") @db.Decimal(5, 2)
+  taxAmount       Decimal   @default(0.00) @map("tax_amount") @db.Decimal(12, 2)
+  lineTotal       Decimal   @map("line_total") @db.Decimal(12, 2)
+
+  invoice         Invoice   @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  product         Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([invoiceId])
+  @@index([productId])
+  @@map("invoice_items")
+}
+
+// ----------------------------------------------------
+// PAYMENTS & CUSTOMER LEDGER (UDHAAR)
+// ----------------------------------------------------
+
+model CustomerPayment {
+  id             String        @id @default(uuid())
+  customerId     String        @map("customer_id")
+  invoiceId      String?       @map("invoice_id")
+  amount         Decimal       @db.Decimal(12, 2)
+  paymentMethod  PaymentMethod @map("payment_method")
+  transactionRef String?       @map("transaction_ref")
+  notes          String?
+  receivedAt     DateTime      @default(now()) @map("received_at")
+
+  customer       Customer      @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  invoice        Invoice?      @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([customerId, receivedAt(sort: Desc)])
+  @@map("customer_payments")
+}
+
+model CustomerLedger {
+  id             String    @id @default(uuid())
+  customerId     String    @map("customer_id")
+  referenceType  String    @map("reference_type") // INVOICE, PAYMENT, RETURN
+  referenceId    String    @map("reference_id")
+  debitAmount    Decimal   @default(0.00) @map("debit_amount") @db.Decimal(12, 2)  // Bill amount added
+  creditAmount   Decimal   @default(0.00) @map("credit_amount") @db.Decimal(12, 2) // Payment received
+  runningBalance Decimal   @map("running_balance") @db.Decimal(12, 2)
+  notes          String?
+  createdAt      DateTime  @default(now()) @map("created_at")
+
+  customer       Customer  @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId, createdAt(sort: Desc)])
+  @@map("customer_ledger")
+}
+
+// ----------------------------------------------------
+// PURCHASES, RESTOCKING & INVENTORY
+// ----------------------------------------------------
+
+model PurchaseOrder {
+  id             String              @id @default(uuid())
+  poNumber       String              @unique @map("po_number")
+  vendorId       String              @map("vendor_id")
+  vendorBillNo   String?             @map("vendor_bill_no")
+  totalAmount    Decimal             @map("total_amount") @db.Decimal(12, 2)
+  paidAmount     Decimal             @default(0.00) @map("paid_amount") @db.Decimal(12, 2)
+  purchaseDate   DateTime            @default(now()) @map("purchase_date")
+  notes          String?
+
+  vendor         Vendor              @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+  items          PurchaseOrderItem[]
+
+  @@index([vendorId, purchaseDate(sort: Desc)])
+  @@map("purchase_orders")
+}
+
+model PurchaseOrderItem {
+  id              String        @id @default(uuid())
+  purchaseOrderId String        @map("purchase_order_id")
+  productId       String        @map("product_id")
+  quantity        Decimal       @db.Decimal(12, 2)
+  unitCostPrice   Decimal       @map("unit_cost_price") @db.Decimal(12, 2)
+  lineTotal       Decimal       @map("line_total") @db.Decimal(12, 2)
+
+  purchaseOrder   PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product         Product       @relation(fields: [productId], references: [id], onDelete: Restrict)
+
+  @@map("purchase_order_items")
+}
+
+model VendorPayment {
+  id             String        @id @default(uuid())
+  vendorId       String        @map("vendor_id")
+  amount         Decimal       @db.Decimal(12, 2)
+  paymentMethod  PaymentMethod @map("payment_method")
+  transactionRef String?       @map("transaction_ref")
+  paidAt         DateTime      @default(now()) @map("paid_at")
+
+  vendor         Vendor        @relation(fields: [vendorId], references: [id], onDelete: Restrict)
+
+  @@map("vendor_payments")
+}
+
+model StockAdjustment {
+  id              String              @id @default(uuid())
+  productId       String              @map("product_id")
+  adjustmentType  StockAdjustmentType @map("adjustment_type")
+  quantityDelta   Decimal             @map("quantity_delta") @db.Decimal(12, 2) // Negative for Spoilage/Sale, Positive for Restock
+  previousStock   Decimal             @map("previous_stock") @db.Decimal(12, 2)
+  newStock        Decimal             @map("new_stock") @db.Decimal(12, 2)
+  reasonNotes     String?             @map("reason_notes")
+  userId          String              @map("user_id")
+  createdAt       DateTime            @default(now()) @map("created_at")
+
+  product         Product             @relation(fields: [productId], references: [id], onDelete: Restrict)
+  user            User                @relation(fields: [userId], references: [id], onDelete: Restrict)
+
+  @@index([productId, createdAt(sort: Desc)])
+  @@map("stock_adjustments")
+}
+
+// ----------------------------------------------------
+// SETTINGS & CONFIGURATION
+// ----------------------------------------------------
+
+model ShopSettings {
+  id               String   @id @default(uuid())
+  shopName         String   @default("Crystal Press") @map("shop_name")
+  tagline          String?  @default("Printing Press & Stationery")
+  addressLine1     String?  @map("address_line1")
+  addressLine2     String?  @map("address_line2")
+  phone1           String?  @map("phone_1")
+  phone2           String?  @map("phone_2")
+  email            String?
+  logoUrl          String?  @map("logo_url")
+  
+  upiId            String?  @map("upi_id") // shop@upi for QR code
+  upiPayeeName     String?  @map("upi_payee_name")
+  
+  invoicePrefix    String   @default("CP") @map("invoice_prefix")
+  jobOrderPrefix   String   @default("JO") @map("job_order_prefix")
+  challanPrefix    String   @default("DC") @map("challan_prefix")
+  
+  receiptFooter    String?  @default("Thank you for your business!") @map("receipt_footer")
+  termsConditions  String?  @map("terms_conditions")
+  
+  defaultTaxRate   Decimal  @default(0.00) @map("default_tax_rate") @db.Decimal(5, 2)
+  isTaxEnabled     Boolean  @default(false) @map("is_tax_enabled")
+  
+  isLoyaltyEnabled          Boolean  @default(true) @map("is_loyalty_enabled")
+  loyaltySpendPerPoint      Decimal  @default(100.00) @map("loyalty_spend_per_point") @db.Decimal(10, 2)
+  loyaltyPointValue         Decimal  @default(1.00) @map("loyalty_point_value") @db.Decimal(10, 2)
+  maxLoyaltyDiscountPercent Decimal  @default(50.00) @map("max_loyalty_discount_percent") @db.Decimal(5, 2)
+  loyaltyDiscountType       String   @default("RUPEES") @map("loyalty_discount_type") // "RUPEES" | "PERCENT"
+  
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  @@map("shop_settings")
+}
+
+// ----------------------------------------------------
+// EXPENSES & PETTY CASH TRACKER
+// ----------------------------------------------------
+
+model ExpenseCategory {
+  id        String    @id @default(uuid())
+  name      String    @unique
+  color     String?   @default("#64748B")
+  isActive  Boolean   @default(true) @map("is_active")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  expenses  Expense[]
+
+  @@map("expense_categories")
+}
+
+model Expense {
+  id            String          @id @default(uuid())
+  expenseNumber String          @unique @map("expense_number")
+  categoryId    String          @map("category_id")
+  title         String
+  amount        Decimal         @db.Decimal(12, 2)
+  paymentMethod PaymentMethod   @default(CASH) @map("payment_method")
+  expenseDate   DateTime        @default(now()) @map("expense_date")
+  recipient     String?
+  notes         String?
+  createdById   String          @map("created_by_id")
+  createdAt     DateTime        @default(now()) @map("created_at")
+
+  category      ExpenseCategory @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+  createdBy     User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+
+  @@index([categoryId, expenseDate(sort: Desc)])
+  @@index([expenseDate(sort: Desc)])
+  @@map("expenses")
+}
+
+// ----------------------------------------------------
+// QUOTATIONS & ESTIMATES GENERATOR
+// ----------------------------------------------------
+
+model Quotation {
+  id              String          @id @default(uuid())
+  quotationNumber String          @unique @map("quotation_number") // QT-2026-0001
+  
+  customerId      String?         @map("customer_id")
+  customerName    String          @default("Valued Customer") @map("customer_name")
+  customerPhone   String?         @map("customer_phone")
+  customerEmail   String?         @map("customer_email")
+  customerAddress String?         @map("customer_address")
+  
+  quotationDate   DateTime        @default(now()) @map("quotation_date")
+  validUntil      DateTime?       @map("valid_until")
+  
+  subTotal        Decimal         @map("sub_total") @db.Decimal(12, 2)
+  discountAmount  Decimal         @default(0.00) @map("discount_amount") @db.Decimal(12, 2)
+  taxPercent      Decimal         @default(0.00) @map("tax_percent") @db.Decimal(5, 2)
+  taxAmount       Decimal         @default(0.00) @map("tax_amount") @db.Decimal(12, 2)
+  roundOff        Decimal         @default(0.00) @map("round_off") @db.Decimal(12, 2)
+  netTotal        Decimal         @map("net_total") @db.Decimal(12, 2)
+  
+  status          QuotationStatus @default(DRAFT)
+  convertedType   String?         @map("converted_type") // "JOB_ORDER" or "INVOICE"
+  convertedId     String?         @map("converted_id")
+  convertedNumber String?         @map("converted_number")
+  
+  termsConditions String?         @map("terms_conditions")
+  notes           String?
+  createdById     String          @map("created_by_id")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  customer        Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  createdBy       User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  items           QuotationItem[]
+
+  @@index([createdAt(sort: Desc)])
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("quotations")
+}
+
+model QuotationItem {
+  id              String    @id @default(uuid())
+  quotationId     String    @map("quotation_id")
+  productId       String?   @map("product_id")
+  itemType        String    @default("CUSTOM_JOB") @map("item_type") // "CUSTOM_JOB", "INVENTORY_PRODUCT", "SERVICE"
+  itemDescription String    @map("item_description")
+  specifications  Json?     // { size: "3.5x2", paper: "350gsm Matte", sides: "4+4", lamination: "Gloss" }
+  
+  quantity        Decimal   @db.Decimal(12, 2)
+  unitName        String    @default("pcs") @map("unit_name")
+  unitPrice       Decimal   @map("unit_price") @db.Decimal(12, 2)
+  discountAmount  Decimal   @default(0.00) @map("discount_amount") @db.Decimal(12, 2)
+  taxPercent      Decimal   @default(0.00) @map("tax_percent") @db.Decimal(5, 2)
+  taxAmount       Decimal   @default(0.00) @map("tax_amount") @db.Decimal(12, 2)
+  lineTotal       Decimal   @map("line_total") @db.Decimal(12, 2)
+
+  quotation       Quotation @relation(fields: [quotationId], references: [id], onDelete: Cascade)
+  product         Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([quotationId])
+  @@index([productId])
+  @@map("quotation_items")
+}
+
+// ----------------------------------------------------
+// DELIVERY CHALLANS & GATE PASSES
+// ----------------------------------------------------
+
+model DeliveryChallan {
+  id              String          @id @default(uuid())
+  challanNumber   String          @unique @map("challan_number") // DC-2026-0001
+  
+  jobOrderId      String?         @map("job_order_id")
+  customerId      String?         @map("customer_id")
+  customerName    String          @map("customer_name")
+  customerPhone   String?         @map("customer_phone")
+  deliveryAddress String?         @map("delivery_address")
+  
+  dispatchDate    DateTime        @default(now()) @map("dispatch_date")
+  dispatchMode    DispatchMode    @default(COMPANY_VEHICLE) @map("dispatch_mode")
+  transporterName String?         @map("transporter_name")
+  vehicleNumber   String?         @map("vehicle_number")
+  lrNumber        String?         @map("lr_number") // Lorry Receipt or Tracking #
+  
+  packageCount    String?         @map("package_count") // e.g. "4 Boxes, 2 Bundles"
+  packagingNotes  String?         @map("packaging_notes")
+  
+  status          ChallanStatus   @default(PREPARED)
+  
+  receivedBy      String?         @map("received_by")
+  receivedAt      DateTime?       @map("received_at")
+  receiverPhone   String?         @map("receiver_phone")
+  receiverNotes   String?         @map("receiver_notes")
+  
+  createdById     String          @map("created_by_id")
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+
+  customer        Customer?       @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  jobOrder        JobOrder?       @relation(fields: [jobOrderId], references: [id], onDelete: SetNull)
+  createdBy       User            @relation(fields: [createdById], references: [id], onDelete: Restrict)
+  items           DeliveryChallanItem[]
+
+  @@index([createdAt(sort: Desc)])
+  @@index([customerId, createdAt(sort: Desc)])
+  @@index([status])
+  @@map("delivery_challans")
+}
+
+model DeliveryChallanItem {
+  id              String          @id @default(uuid())
+  challanId       String          @map("challan_id")
+  itemDescription String          @map("item_description")
+  quantity        Decimal         @db.Decimal(12, 2)
+  unitName        String          @default("pcs") @map("unit_name")
+  hsnCode         String?         @map("hsn_code")
+  remarks         String?
+
+  challan         DeliveryChallan @relation(fields: [challanId], references: [id], onDelete: Cascade)
+
+  @@index([challanId])
+  @@map("delivery_challan_items")
+}
+
+// ====================================================
+// CASH DRAWER & SHIFT RECONCILIATION
+// ====================================================
+
+enum ShiftStatus {
+  OPEN
+  CLOSED
+}
+
+model CashShift {
+  id                 String       @id @default(uuid())
+  shiftNumber        String       @unique @map("shift_number")
+  
+  openedById         String       @map("opened_by_id")
+  openedBy           User         @relation("ShiftOpenedBy", fields: [openedById], references: [id], onDelete: Restrict)
+  
+  closedById         String?      @map("closed_by_id")
+  closedBy           User?        @relation("ShiftClosedBy", fields: [closedById], references: [id], onDelete: SetNull)
+  
+  openedAt           DateTime     @default(now()) @map("opened_at")
+  closedAt           DateTime?    @map("closed_at")
+  status             ShiftStatus  @default(OPEN)
+  
+  openingFloat       Decimal      @default(0.00) @map("opening_float") @db.Decimal(12, 2)
+  expectedCash       Decimal?     @map("expected_cash") @db.Decimal(12, 2)
+  actualCash         Decimal?     @map("actual_cash") @db.Decimal(12, 2)
+  discrepancy        Decimal?     @db.Decimal(12, 2)
+  
+  totalSales         Decimal      @default(0.00) @map("total_sales") @db.Decimal(12, 2)
+  cashSales          Decimal      @default(0.00) @map("cash_sales") @db.Decimal(12, 2)
+  upiSales           Decimal      @default(0.00) @map("upi_sales") @db.Decimal(12, 2)
+  cardSales          Decimal      @default(0.00) @map("card_sales") @db.Decimal(12, 2)
+  udhaarSales        Decimal      @default(0.00) @map("udhaar_sales") @db.Decimal(12, 2)
+  pettyCashExpenses  Decimal      @default(0.00) @map("petty_cash_expenses") @db.Decimal(12, 2)
+  
+  denominations      String?      @db.Text // JSON string of denomination counts
+  handoverNotes      String?      @map("handover_notes")
+  nextCashierName    String?      @map("next_cashier_name")
+  closingFloatKept   Decimal?     @map("closing_float_kept") @db.Decimal(12, 2)
+  cashBanked         Decimal?     @map("cash_banked") @db.Decimal(12, 2)
+  
+  createdAt          DateTime     @default(now()) @map("created_at")
+  updatedAt          DateTime     @updatedAt @map("updated_at")
+
+  @@index([status, openedAt(sort: Desc)])
+  @@map("cash_shifts")
+}
+
+// ====================================================
+// CUSTOMER WALLET & LOYALTY PASSBOOK
+// ====================================================
+
+model CustomerWalletTransaction {
+  id                   String         @id @default(uuid())
+  customerId           String         @map("customer_id")
+  customer             Customer       @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  
+  type                 String         // WALLET_TOPUP, WALLET_PAYMENT, POINTS_ACCRUED, POINTS_REDEEMED, REFUND
+  amount               Decimal        @default(0.00) @db.Decimal(12, 2)
+  points               Int            @default(0)
+  
+  runningWalletBalance Decimal        @map("running_wallet_balance") @db.Decimal(12, 2)
+  runningPointsBalance Int            @map("running_points_balance")
+  
+  paymentMethod        PaymentMethod? @map("payment_method")
+  referenceType        String?        @map("reference_type") // INVOICE, JOB_ORDER, MANUAL_TOPUP, REDEMPTION
+  referenceId          String?        @map("reference_id")
+  notes                String?
+  
+  createdAt            DateTime       @default(now()) @map("created_at")
+
+  @@index([customerId, createdAt(sort: Desc)])
+  @@map("customer_wallet_transactions")
+}
+
+
+
+

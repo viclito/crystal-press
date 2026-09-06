@@ -1,0 +1,95 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    /* Canvas & Surfaces */
+    --background: 210 40% 98%;        /* Soft slate canvas #F8FAFC */
+    --foreground: 222 47% 11%;        /* Dark crisp slate #0F172A */
+    
+    --card: 0 0% 100%;                /* Pure white card #FFFFFF */
+    --card-foreground: 222 47% 11%;
+    
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* Brand Accents (Chartreuse / Fresh Lime) */
+    --primary: 84 81% 44%;            /* Vibrant lime #84CC16 */
+    --primary-foreground: 0 0% 100%;
+    --primary-light: 84 81% 92%;      /* Soft lime glow #ECFCCB */
+    --primary-hover: 84 81% 38%;
+
+    --secondary: 210 40% 96.1%;       /* #F1F5F9 */
+    --secondary-foreground: 222 47% 11%;
+
+    --muted: 210 40% 96.1%;
+    --muted-foreground: 215.4 16.3% 46.9%; /* #64748B */
+    
+    --accent: 84 81% 94%;             /* Very soft lime tint */
+    --accent-foreground: 84 81% 25%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214.3 31.8% 91.4%;      /* #E2E8F0 */
+    --input: 214.3 31.8% 91.4%;
+    --ring: 84 81% 44%;
+
+    --radius: 1.25rem;                /* 20px modern organic radius */
+  }
+
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground antialiased selection:bg-lime-200 selection:text-slate-900;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-feature-settings: "rlig" 1, "calt" 1;
+  }
+}
+
+/* Custom Scrollbar for POS and Table Performance */
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Hide scrollbar for clean horizontal tab strips */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Screen Print Media Rules */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  #printable-receipt, #printable-receipt *, #printable-z-report, #printable-z-report * {
+    visibility: visible;
+  }
+  #printable-receipt, #printable-z-report {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+  }
+}
