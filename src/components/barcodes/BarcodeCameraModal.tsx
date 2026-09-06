@@ -48,7 +48,7 @@ export function BarcodeCameraModal({
   const [hasTorch, setHasTorch] = useState(false);
   const [isTorchOn, setIsTorchOn] = useState(false);
   const [zoomLevel, setZoomLevel] = useState<1 | 2>(1);
-  const [scanStatusText, setScanStatusText] = useState<string>("Align barcode in box");
+  const [scanStatusText, setScanStatusText] = useState<string>("Align barcode bars in box");
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -67,8 +67,8 @@ export function BarcodeCameraModal({
     onCloseRef.current = onClose;
   });
 
-  // Strict formats: Code 128 (Crystal Press), EAN/UPC (Retail standard)
-  // Exclude Code 39 & ITF to eliminate false-positive ghost reads from screen text / moiré
+  // Strict formats: Code 128 (Crystal Press primary), EAN-13, EAN-8, UPC-A, QR Code
+  // Eliminates Code 39 & ITF to prevent false-positive ghost reads from screen text / moiré
   const getHints = useCallback(() => {
     const hints = new Map();
     const formats = [
@@ -128,17 +128,17 @@ export function BarcodeCameraModal({
           playErrorBeep();
           setUnrecognizedCode(code);
           setScanStatusText(`Not Found: ${code}`);
-          toast.warning(`Scanned: ${code} (Not found in catalog)`);
+          toast.warning(`Scanned: ${code} (Not in catalog)`);
 
-          // 3s cooldown so it does not loop spam toasts
+          // 2.5s cooldown so it auto-resumes smoothly without looping toasts
           setTimeout(() => {
             if (!isMatchedRef.current) {
               isHandlingRef.current = false;
               setIsSearching(false);
               setUnrecognizedCode(null);
-              setScanStatusText("Align barcode in box");
+              setScanStatusText("Align barcode bars in box");
             }
-          }, 3000);
+          }, 2500);
         }
       } catch (err) {
         playErrorBeep();
@@ -149,15 +149,15 @@ export function BarcodeCameraModal({
             isHandlingRef.current = false;
             setIsSearching(false);
             setUnrecognizedCode(null);
-            setScanStatusText("Align barcode in box");
+            setScanStatusText("Align barcode bars in box");
           }
-        }, 3000);
+        }, 2500);
       }
     },
     []
   );
 
-  // Multi-pass Frame Decoder strictly on the cropped reticle target
+  // Multi-pass Frame Decoder strictly on the high-resolution cropped canvas
   const processFrameAndDecode = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -171,9 +171,10 @@ export function BarcodeCameraModal({
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     if (!ctx) return;
 
-    // Crop strictly to the reticle box area so adjacent stickers are excluded
-    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.60 : 0.80));
-    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.40 : 0.48));
+    // Generous vertical capture zone (78% height) so the barcode bars are ALWAYS captured
+    // even if the user points slightly high (at title) or slightly low (at numbers/price)
+    const cropW = Math.floor(vw * (zoomLevel === 2 ? 0.70 : 0.86));
+    const cropH = Math.floor(vh * (zoomLevel === 2 ? 0.60 : 0.78));
     const cropX = Math.floor((vw - cropW) / 2);
     const cropY = Math.floor((vh - cropH) / 2);
 
@@ -182,7 +183,6 @@ export function BarcodeCameraModal({
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
     // Pass 1: Native Hardware BarcodeDetector on the CROPPED CANVAS ONLY
-    // (Scanning cropped canvas guarantees only the sticker inside reticle is detected)
     if (nativeDetectorRef.current) {
       nativeDetectorRef.current
         .detect(canvas)
@@ -279,7 +279,7 @@ export function BarcodeCameraModal({
     setIsSearching(false);
     setUnrecognizedCode(null);
     setDetectedProduct(null);
-    setScanStatusText("Align barcode in box");
+    setScanStatusText("Align barcode bars in box");
   };
 
   // Initialize Camera & Frame Loop - strictly controlled by isOpen only!
@@ -291,7 +291,7 @@ export function BarcodeCameraModal({
     setIsSearching(false);
     setDetectedProduct(null);
     setUnrecognizedCode(null);
-    setScanStatusText("Align barcode in box");
+    setScanStatusText("Align barcode bars in box");
 
     let activeStream: MediaStream | null = null;
 
@@ -483,11 +483,11 @@ export function BarcodeCameraModal({
               {/* Hidden Canvas for High-Precision Reticle Frame Analysis */}
               <canvas ref={canvasRef} className="hidden" />
 
-              {/* Aiming Reticle Frame (Unobstructed View - text label positioned ABOVE the box!) */}
-              <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-4">
+              {/* Aiming Reticle Frame - Taller, clearer frame with guide line */}
+              <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-3">
                 {/* Status Indicator Label placed ABOVE the box so it NEVER covers barcode lines */}
                 <div
-                  className={`mb-2 text-[10px] font-bold px-3 py-0.5 rounded-full border backdrop-blur-sm shadow-md transition-colors ${
+                  className={`mb-1.5 text-[10px] font-bold px-3 py-0.5 rounded-full border backdrop-blur-sm shadow-md transition-colors ${
                     unrecognizedCode
                       ? "text-amber-300 bg-amber-950/85 border-amber-500/40"
                       : detectedProduct
@@ -499,7 +499,7 @@ export function BarcodeCameraModal({
                 </div>
 
                 <div
-                  className={`w-72 h-36 border-2 border-dashed rounded-2xl relative transition-all flex items-center justify-center ${
+                  className={`w-80 h-44 border-2 border-dashed rounded-2xl relative transition-all flex flex-col items-center justify-center ${
                     detectedProduct
                       ? "border-emerald-400 bg-emerald-500/15 shadow-[0_0_35px_rgba(52,211,153,0.6)]"
                       : unrecognizedCode
@@ -511,10 +511,15 @@ export function BarcodeCameraModal({
                   <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-lime-400 to-transparent shadow-[0_0_10px_#a3e635] animate-pulse" />
 
                   {/* Corner Accent Brackets */}
-                  <div className="absolute -top-1 -left-1 w-3.5 h-3.5 border-t-2 border-l-2 border-lime-300" />
-                  <div className="absolute -top-1 -right-1 w-3.5 h-3.5 border-t-2 border-r-2 border-lime-300" />
-                  <div className="absolute -bottom-1 -left-1 w-3.5 h-3.5 border-b-2 border-l-2 border-lime-300" />
-                  <div className="absolute -bottom-1 -right-1 w-3.5 h-3.5 border-b-2 border-r-2 border-lime-300" />
+                  <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-lime-300" />
+                  <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-lime-300" />
+                  <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-lime-300" />
+                  <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-lime-300" />
+
+                  {/* Helpful center guide text */}
+                  <span className="absolute bottom-2 text-[9px] font-bold text-slate-200/80 bg-slate-950/70 px-2 py-0.5 rounded-md backdrop-blur-xs">
+                    Hold barcode bars across laser line
+                  </span>
                 </div>
               </div>
 
