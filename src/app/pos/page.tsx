@@ -2,16 +2,10 @@ import React from "react";
 import { prisma } from "@/lib/prisma";
 import { POSCounterClient } from "./POSCounterClient";
 import { DashboardShell } from "@/components/layout/DashboardShell";
+import { unstable_cache } from "next/cache";
 
-export const dynamic = "force-dynamic";
-
-export default async function POSPage() {
-  let serializedProducts: any[] = [];
-  let categories: any[] = [];
-  let serializedCustomers: any[] = [];
-  let shopSettings: any = null;
-
-  try {
+const getCachedPOSData = unstable_cache(
+  async () => {
     const [products, cats, customers, settings] = await Promise.all([
       prisma.product.findMany({
         where: { isActive: true },
@@ -35,7 +29,7 @@ export default async function POSPage() {
       prisma.shopSettings.findFirst(),
     ]);
 
-    serializedProducts = products.map((p) => ({
+    const serializedProducts = products.map((p) => ({
       id: p.id,
       name: p.name,
       skuCode: p.skuCode,
@@ -57,14 +51,16 @@ export default async function POSPage() {
         : undefined,
       version: p.version,
     }));
-    categories = cats.map((c) => ({
+
+    const categories = cats.map((c) => ({
       id: c.id,
       name: c.name,
       slug: c.slug,
       displayOrder: c.displayOrder,
       isActive: c.isActive,
     }));
-    serializedCustomers = customers.map((c) => ({
+
+    const serializedCustomers = customers.map((c) => ({
       id: c.id,
       name: c.name,
       phone: c.phone || "",
@@ -72,7 +68,8 @@ export default async function POSPage() {
       walletBalance: Number(c.walletBalance || 0),
       loyaltyPoints: Number(c.loyaltyPoints || 0),
     }));
-    shopSettings = settings
+
+    const shopSettings = settings
       ? {
           id: settings.id,
           shopName: settings.shopName || "Crystal Press",
@@ -96,8 +93,35 @@ export default async function POSPage() {
           isLoyaltyEnabled: Boolean(settings.isLoyaltyEnabled ?? true),
         }
       : null;
+
+    return {
+      products: serializedProducts,
+      categories,
+      customers: serializedCustomers,
+      shopSettings,
+    };
+  },
+  ["pos-master-data"],
+  {
+    revalidate: 30,
+    tags: ["pos-catalog", "products", "categories", "customers", "settings"],
+  }
+);
+
+export default async function POSPage() {
+  let serializedProducts: any[] = [];
+  let categories: any[] = [];
+  let serializedCustomers: any[] = [];
+  let shopSettings: any = null;
+
+  try {
+    const data = await getCachedPOSData();
+    serializedProducts = data.products;
+    categories = data.categories;
+    serializedCustomers = data.customers;
+    shopSettings = data.shopSettings;
   } catch (error) {
-    console.warn("⚠️ Database not connected during POS build, using fallback data.");
+    console.warn("⚠️ Database query failed or fallback used for POS page:", error);
   }
 
   return (

@@ -152,6 +152,7 @@ export function Sidebar() {
       <Link
         key={item.href}
         href={item.href}
+        prefetch={false}
         onClick={() => setMobileOpen(false)}
         target={item.openInNewTab ? "_blank" : undefined}
         rel={item.openInNewTab ? "noopener noreferrer" : undefined}
@@ -199,6 +200,7 @@ export function Sidebar() {
       <div className="shrink-0 flex items-center justify-between px-2 py-1 mb-3 pb-3 border-b border-slate-100/70">
         <Link
           href={userRole === "CASHIER" ? "/pos" : "/"}
+          prefetch={false}
           onClick={() => setMobileOpen(false)}
           className="flex items-center gap-3 hover:opacity-90 transition-opacity"
         >
@@ -368,6 +370,7 @@ export function Sidebar() {
             </p>
             <Link
               href="/pos"
+              prefetch={false}
               onClick={() => setMobileOpen(false)}
               className="mt-2.5 block w-full py-1.5 text-center text-xs font-bold bg-slate-900 text-white rounded-xl hover:bg-slate-800 transition-colors shadow-sm"
             >
