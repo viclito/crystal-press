@@ -1,11 +1,12 @@
 "use client";
 
 import React, { useEffect, useState } from "react";
-import { Search, Bell, Settings, LogOut, Clock, User, Shield, Sparkles, Zap, Menu } from "lucide-react";
+import { Settings, LogOut, Clock, User, Shield, Sparkles, Zap, Menu } from "lucide-react";
 import { useSession, signOut, signIn } from "next-auth/react";
 import Link from "next/link";
 import { toast } from "@/stores/useSnackbarStore";
 import { useSidebarStore } from "@/stores/useSidebarStore";
+import { NotificationDropdown } from "@/components/layout/NotificationDropdown";
 
 export function Header({ title = "Dashboard" }: { title?: string }) {
   const { data: session } = useSession();
@@ -88,31 +89,10 @@ export function Header({ title = "Dashboard" }: { title?: string }) {
         </div>
       </div>
 
-      {/* Global Quick Search Bar */}
-      <div className="flex-1 max-w-md mx-8 hidden md:block">
-        <div className="relative">
-          <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            placeholder="Search product, barcode, customer, or job order... (F2)"
-            className="w-full pl-10 pr-16 py-2.5 bg-slate-50 border border-slate-100 rounded-2xl text-xs font-medium text-slate-800 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-lime-400/50 focus:bg-white transition-all shadow-inner"
-          />
-          <kbd className="absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-bold bg-white text-slate-400 px-2 py-0.5 rounded-lg border border-slate-200 shadow-sm">
-            F2
-          </kbd>
-        </div>
-      </div>
-
       {/* Right Controls & Profile */}
-      <div className="flex items-center gap-3">
-        {/* Notification Bell */}
-        <button
-          title="Notifications"
-          className="relative p-2.5 rounded-2xl text-slate-500 hover:text-slate-900 hover:bg-slate-50 transition-colors border border-slate-100"
-        >
-          <Bell className="w-4 h-4" />
-          <span className="absolute top-2 right-2 w-2 h-2 rounded-full bg-lime-500 ring-2 ring-white" />
-        </button>
+      <div className="flex items-center gap-2.5 sm:gap-3">
+        {/* Interactive Notification Center */}
+        <NotificationDropdown />
 
         {/* Settings Button */}
         {userRole === "ADMIN" && (
