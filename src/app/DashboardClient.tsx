@@ -40,6 +40,7 @@ import {
 import { formatCurrency, formatDate, cn } from "@/lib/utils";
 import { generateWhatsAppCustomerStatementUrl } from "@/utils/whatsapp";
 import { toast } from "@/stores/useSnackbarStore";
+import { saveDashboardWidgetConfig } from "@/actions/dashboard";
 
 interface DataPoint {
   label: string;
@@ -107,34 +108,77 @@ export function DashboardClient({
 }: DashboardClientProps) {
   const isAdmin = userRole === "ADMIN";
 
-  // Widget visibility configuration
-  const [config, setConfig] = useState<DashboardWidgetConfig>(DEFAULT_DASHBOARD_CONFIG);
+  // Widget visibility configuration with primary database sync and localStorage fallback
+  const initialDbConfig = shopSettings?.dashboardConfig;
+  const [config, setConfig] = useState<DashboardWidgetConfig>(() => {
+    if (initialDbConfig && typeof initialDbConfig === "object") {
+      return {
+        ...DEFAULT_DASHBOARD_CONFIG,
+        ...initialDbConfig,
+      };
+    }
+    return DEFAULT_DASHBOARD_CONFIG;
+  });
   const [isCustomizerOpen, setIsCustomizerOpen] = useState(false);
   const [chartRange, setChartRange] = useState<"7D" | "30D" | "6M">("7D");
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null);
 
-  // Load configuration from localStorage
+  // Load and synchronize configuration: Database -> LocalStorage -> State
   useEffect(() => {
+    // 1. If database has saved configuration, use it and update local offline cache
+    if (shopSettings?.dashboardConfig && typeof shopSettings.dashboardConfig === "object") {
+      setConfig({
+        ...DEFAULT_DASHBOARD_CONFIG,
+        ...shopSettings.dashboardConfig,
+      });
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(shopSettings.dashboardConfig));
+      } catch (e) {}
+      return;
+    }
+
+    // 2. If database does not yet have it, check localStorage (e.g. customized yesterday on this browser)
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) {
-        setConfig({
-          ...DEFAULT_DASHBOARD_CONFIG,
-          ...JSON.parse(saved),
-        });
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed === "object") {
+          setConfig({
+            ...DEFAULT_DASHBOARD_CONFIG,
+            ...parsed,
+          });
+          // Auto-migrate local customization to database cloud storage so it's never lost!
+          if (isAdmin) {
+            saveDashboardWidgetConfig(parsed).catch(() => {});
+          }
+        }
       }
     } catch (e) {
       // Ignore storage errors
     }
-  }, []);
+  }, [shopSettings?.dashboardConfig, isAdmin]);
 
-  // Save configuration change
-  const handleConfigChange = (newConfig: DashboardWidgetConfig) => {
+  // Save configuration change to state, local cache, and cloud database
+  const handleConfigChange = async (newConfig: DashboardWidgetConfig) => {
     setConfig(newConfig);
+
+    // Save to local cache immediately
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(newConfig));
-    } catch (e) {
-      // Ignore storage errors
+    } catch (e) {}
+
+    // Persist permanently to PostgreSQL database
+    if (isAdmin) {
+      try {
+        const res = await saveDashboardWidgetConfig(newConfig);
+        if (res.success) {
+          toast.success("Dashboard layout saved across all devices");
+        } else {
+          toast.warning("Saved locally. Cloud sync: " + (res.error || "offline"));
+        }
+      } catch (err) {
+        console.error("Failed to save dashboard config to cloud:", err);
+      }
     }
   };
 

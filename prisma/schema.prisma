@@ -528,6 +528,8 @@ model ShopSettings {
   maxLoyaltyDiscountPercent Decimal  @default(50.00) @map("max_loyalty_discount_percent") @db.Decimal(5, 2)
   loyaltyDiscountType       String   @default("RUPEES") @map("loyalty_discount_type") // "RUPEES" | "PERCENT"
   
+  dashboardConfig           Json?    @map("dashboard_config")
+
   updatedAt        DateTime @updatedAt @map("updated_at")
 
   @@map("shop_settings")

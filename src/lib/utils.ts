@@ -37,6 +37,11 @@ export function serializeShopSettings(settings: any) {
     maxLoyaltyDiscountPercent: Number(settings.maxLoyaltyDiscountPercent ?? 50),
     loyaltyDiscountType: settings.loyaltyDiscountType || "RUPEES",
     isLoyaltyEnabled: settings.isLoyaltyEnabled ?? true,
+    dashboardConfig: settings.dashboardConfig
+      ? typeof settings.dashboardConfig === "string"
+        ? JSON.parse(settings.dashboardConfig)
+        : settings.dashboardConfig
+      : null,
     updatedAt: settings.updatedAt instanceof Date ? settings.updatedAt.toISOString() : (settings.updatedAt || null),
   };
 }

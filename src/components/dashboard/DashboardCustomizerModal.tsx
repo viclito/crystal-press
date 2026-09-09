@@ -17,6 +17,7 @@ import {
   Receipt,
   CheckCircle2,
   LayoutDashboard,
+  Cloud,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "@/stores/useSnackbarStore";
@@ -212,8 +213,9 @@ export function DashboardCustomizerModal({
                   Admin Only
                 </span>
               </h2>
-              <p className="text-xs text-slate-400">
-                Choose which metrics, charts, and lists appear on the main dashboard
+              <p className="text-xs text-slate-400 flex items-center gap-1 mt-0.5">
+                <Cloud className="w-3 h-3 text-lime-600 shrink-0" />
+                <span>Saved to cloud database • Syncs across all mobile & desktop devices</span>
               </p>
             </div>
           </div>
@@ -478,7 +480,10 @@ export function DashboardCustomizerModal({
           </button>
 
           <button
-            onClick={onClose}
+            onClick={() => {
+              onChange(config);
+              onClose();
+            }}
             className="px-5 py-2 bg-slate-900 hover:bg-slate-800 text-white font-extrabold text-xs rounded-xl shadow-md transition-all active:scale-98 flex items-center gap-1.5"
           >
             <Check className="w-3.5 h-3.5 text-lime-400" />
