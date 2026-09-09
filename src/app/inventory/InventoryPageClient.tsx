@@ -1,13 +1,14 @@
 "use client";
 
-import React, { useState, useMemo, useRef } from "react";
+import React, { useState, useMemo, useRef, useEffect } from "react";
+import { useSearchParams } from "next/navigation";
 import { Plus, Search, Filter, AlertTriangle, Edit3, SlidersHorizontal, Barcode, Boxes, ArrowUpDown, FileSpreadsheet, Download } from "lucide-react";
 import { StatCard } from "@/components/ui/StatCard";
 import { ProductFormModal } from "@/components/inventory/ProductFormModal";
 import { StockAdjustmentModal } from "@/components/inventory/StockAdjustmentModal";
 import { BulkImportModal } from "@/components/inventory/BulkImportModal";
 import { CategoryManagerModal } from "@/components/inventory/CategoryManagerModal";
-import { printBarcodeSticker } from "@/components/inventory/BarcodeStickerPrint";
+import { BarcodePrintModal } from "@/components/inventory/BarcodePrintModal";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { formatCurrency, cn } from "@/lib/utils";
 
@@ -22,15 +23,30 @@ export function InventoryPageClient({
   categories,
   units,
 }: InventoryPageClientProps) {
-  const [search, setSearch] = useState("");
+  const searchParams = useSearchParams();
+  const urlFilter = searchParams.get("filter");
+  const urlSearch = searchParams.get("search");
+
+  const [search, setSearch] = useState(urlSearch || "");
   const [selectedCategory, setSelectedCategory] = useState("ALL");
-  const [filterLowStockOnly, setFilterLowStockOnly] = useState(false);
+  const [filterLowStockOnly, setFilterLowStockOnly] = useState(urlFilter === "low_stock");
+
+  useEffect(() => {
+    if (urlFilter === "low_stock") {
+      setFilterLowStockOnly(true);
+      setSelectedCategory("ALL");
+    }
+    if (urlSearch) {
+      setSearch(urlSearch);
+    }
+  }, [urlFilter, urlSearch]);
 
   const [isAddOpen, setIsAddOpen] = useState(false);
   const [isBulkImportOpen, setIsBulkImportOpen] = useState(false);
   const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<any | null>(null);
   const [adjustingProduct, setAdjustingProduct] = useState<any | null>(null);
+  const [barcodeModalProduct, setBarcodeModalProduct] = useState<any | null>(null);
 
   const parentRef = useRef<HTMLDivElement>(null);
 
@@ -105,15 +121,34 @@ export function InventoryPageClient({
           changeType="neutral"
         />
 
-        <StatCard
-          title="Low-Stock Alerts"
-          value={lowStockItems.length}
-          subtitle="Below reorder threshold"
-          icon={<AlertTriangle className="w-5 h-5" />}
-          iconBg="bg-rose-50 text-rose-800 border border-rose-200/80"
-          changeText={lowStockItems.length > 0 ? "Reorder Needed" : "Healthy"}
-          changeType={lowStockItems.length > 0 ? "negative" : "positive"}
-        />
+        <div
+          onClick={() => {
+            const next = !filterLowStockOnly;
+            setFilterLowStockOnly(next);
+            if (next) setSelectedCategory("ALL");
+          }}
+          className="cursor-pointer transition-transform hover:scale-[1.01] active:scale-99 select-none"
+          title={filterLowStockOnly ? "Click to view all products" : "Click to view low-stock items"}
+        >
+          <StatCard
+            title="Low-Stock Alerts"
+            value={lowStockItems.length}
+            subtitle={
+              filterLowStockOnly
+                ? "Active Filter (Click to show all)"
+                : "Below reorder threshold"
+            }
+            icon={<AlertTriangle className="w-5 h-5" />}
+            iconBg={cn(
+              "border",
+              filterLowStockOnly
+                ? "bg-rose-600 text-white border-rose-700 shadow-sm"
+                : "bg-rose-50 text-rose-800 border border-rose-200/80"
+            )}
+            changeText={lowStockItems.length > 0 ? `${lowStockItems.length} Reorder Needed` : "Healthy"}
+            changeType={lowStockItems.length > 0 ? "negative" : "positive"}
+          />
+        </div>
       </div>
 
       {/* Control & Search Bar */}
@@ -131,7 +166,11 @@ export function InventoryPageClient({
           </div>
 
           <button
-            onClick={() => setFilterLowStockOnly(!filterLowStockOnly)}
+            onClick={() => {
+              const next = !filterLowStockOnly;
+              setFilterLowStockOnly(next);
+              if (next) setSelectedCategory("ALL");
+            }}
             className={cn(
               "px-3.5 py-2.5 rounded-2xl text-xs font-bold transition-all flex items-center gap-1.5 whitespace-nowrap",
               filterLowStockOnly
@@ -284,7 +323,7 @@ export function InventoryPageClient({
                     <div className="col-span-2 flex items-center justify-end gap-1.5">
                       <button
                         title="Print Barcode Stickers"
-                        onClick={() => printBarcodeSticker(p)}
+                        onClick={() => setBarcodeModalProduct(p)}
                         className="p-1.5 text-slate-400 hover:text-slate-800 rounded-xl hover:bg-slate-100 transition-colors"
                       >
                         <Barcode className="w-4 h-4" />
@@ -349,6 +388,15 @@ export function InventoryPageClient({
         onClose={() => setAdjustingProduct(null)}
         product={adjustingProduct}
       />
+
+      {/* Barcode Print Modal */}
+      {barcodeModalProduct && (
+        <BarcodePrintModal
+          isOpen={!!barcodeModalProduct}
+          onClose={() => setBarcodeModalProduct(null)}
+          product={barcodeModalProduct}
+        />
+      )}
     </div>
   );
 }

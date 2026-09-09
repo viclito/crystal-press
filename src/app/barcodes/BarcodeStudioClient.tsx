@@ -926,17 +926,20 @@ export function BarcodeStudioClient({
     } else if (template === "A4_24_UP") {
       containerClass = "a4-grid-24";
       printCss = `
-        @page { size: A4 portrait; margin: 10mm; }
+        @page { size: A4 portrait; margin: 6mm; }
         body { margin: 0; padding: 0; }
         .a4-grid-24 {
           display: grid;
           grid-template-columns: repeat(3, 1fr);
-          gap: 6mm 4mm;
+          grid-template-rows: repeat(8, 31.5mm);
+          gap: 2.2mm 3mm;
+          page-break-inside: avoid;
+          break-inside: avoid;
         }
         .barcode-sticker {
-          height: 33mm;
+          height: 31.5mm;
           box-sizing: border-box;
-          padding: 2mm 3mm;
+          padding: 1.5mm 2.5mm;
           border: 1px dashed #cbd5e1;
           display: flex;
           flex-direction: column;

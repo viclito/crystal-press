@@ -16,14 +16,13 @@ export async function getSystemNotifications() {
   try {
     const notifications: SystemNotification[] = [];
 
-    const [lowStockProducts, activeJobs, debtorCustomers, pendingChallansCount, openQuotesCount] =
+    const [allProducts, activeJobs, debtorCustomers, pendingChallansCount, openQuotesCount] =
       await Promise.all([
-        // 1. Critical Low Stock Products (lte 15 units)
+        // 1. Catalog Products to check against minStockAlert
         prisma.product.findMany({
-          where: { isActive: true, currentStock: { lte: 15 } },
+          where: { isActive: true },
           orderBy: { currentStock: "asc" },
-          take: 4,
-          select: { id: true, name: true, currentStock: true, skuCode: true },
+          select: { id: true, name: true, currentStock: true, minStockAlert: true, skuCode: true },
         }),
 
         // 2. Active Job Orders in Production
@@ -61,16 +60,20 @@ export async function getSystemNotifications() {
         }),
       ]);
 
-    // Format Low Stock Alerts
-    for (const prod of lowStockProducts) {
+    // Format Low Stock Alerts: strictly where currentStock <= minStockAlert
+    const genuineLowStock = allProducts.filter(
+      (p) => Number(p.currentStock) <= Number(p.minStockAlert)
+    );
+
+    for (const prod of genuineLowStock.slice(0, 5)) {
       notifications.push({
         id: `stock-${prod.id}`,
         type: "low_stock",
         title: `Low Stock: ${prod.name}`,
-        description: `Only ${Number(prod.currentStock)} units remaining (SKU: ${prod.skuCode})`,
+        description: `Current Stock: ${Number(prod.currentStock)} units (Min Alert: ${Number(prod.minStockAlert)})`,
         time: "Reorder Alert",
-        severity: Number(prod.currentStock) <= 5 ? "urgent" : "warning",
-        link: "/inventory",
+        severity: Number(prod.currentStock) <= 3 ? "urgent" : "warning",
+        link: `/inventory?filter=low_stock&search=${encodeURIComponent(prod.name)}`,
       });
     }
 

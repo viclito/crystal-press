@@ -79,11 +79,13 @@ export default async function InventoryPage() {
 
   return (
     <DashboardShell title="Inventory & Stock Master">
-      <InventoryPageClient
-        initialProducts={serializedProducts}
-        categories={categories}
-        units={units}
-      />
+      <React.Suspense fallback={<div className="p-8 text-center text-slate-400">Loading inventory...</div>}>
+        <InventoryPageClient
+          initialProducts={serializedProducts}
+          categories={categories}
+          units={units}
+        />
+      </React.Suspense>
     </DashboardShell>
   );
 }
